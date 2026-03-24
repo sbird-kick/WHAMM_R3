@@ -4,10 +4,21 @@
 
 use r3_mem;
 
+// ── Shadow memory initialization from data segments ─────────────────────
+var data_len: u32 = active_data_len(APP_MEMID);
+var data_start: u32 = active_data_start(APP_MEMID);
+var ptr: i32 = r3_mem.mem_alloc(data_len as i32);
+memcpy(APP_MEMID, data_start, memid(r3_mem), ptr as u32, data_len);
+
 var call_depth: i32;
 var next_is_external: bool;
+var shadow_inited: bool;
 
 wasm:func:entry /!fname.starts_with("r3")/ {
+    if (!shadow_inited) {
+        shadow_inited = true;
+        r3_mem.init_shadow(ptr, data_start as i32, data_len as i32);
+    }
     if (call_depth == 0 || next_is_external) {
         r3_mem.record_ec(fid as i32);
         next_is_external = false;
@@ -19,12 +30,14 @@ wasm:func:exit /!fname.starts_with("r3")/ {
     call_depth = call_depth - 1;
 }
 
-wasm:opcode:call:before /target_fn_type == "import"/ {
+wasm:opcode:call:before /target_fn_name.starts_with("r3") && !fname.starts_with("r3")/ {
     next_is_external = true;
-    r3_mem.record_ic(imm0 as i32);
+    r3_mem.record_ic(imm0 as i32, fid as i32);
 }
 
-// NOTE: wasm:opcode:call:after has a whamm codegen bug. IR events skipped.
+wasm:opcode:call:after /target_fn_name.starts_with("r3") && !fname.starts_with("r3")/ {
+    r3_mem.record_ir(imm0 as i32);
+}
 
 wasm:opcode:i32.store|i32.store8|i32.store16:before /!fname.starts_with("r3")/ {
     r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);

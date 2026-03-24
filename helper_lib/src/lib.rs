@@ -18,12 +18,21 @@ enum TraceEvent {
 struct R3MemState {
     shadow: HashMap<u32, u8>,
     trace: Vec<TraceEvent>,
-    has_had_ic: bool,
+    /// Pending IC event: (target_fid, caller_fid).
+    /// Deferred so that when call:before fires at the same code position as
+    /// func:entry (whamm insertion ordering), we can place EC before IC.
+    pending_ic: Option<(u32, u32)>,
 }
 
 impl R3MemState {
     fn new() -> Self {
-        R3MemState { shadow: HashMap::new(), trace: Vec::new(), has_had_ic: false }
+        R3MemState { shadow: HashMap::new(), trace: Vec::new(), pending_ic: None }
+    }
+
+    fn flush_pending_ic(&mut self) {
+        if let Some((target_fid, _)) = self.pending_ic.take() {
+            self.trace.push(TraceEvent::Ic { fid: target_fid });
+        }
     }
 
     fn write_shadow(&mut self, addr: u32, size: u32, value: i64) {
@@ -79,23 +88,44 @@ pub fn mem_free(ptr: i32) {
 // ── Exported probe functions ──────────────────────────────────────────────
 
 /// EC: external (host→wasm) call.
+/// If there is a pending IC whose caller matches this EC's fid, the IC was
+/// placed before EC due to whamm insertion ordering — emit EC first, then IC.
+/// Otherwise flush any pending IC before this EC (genuine execution order).
 #[no_mangle]
 pub fn record_ec(fid: i32) {
-    STATE.lock().unwrap().trace.push(TraceEvent::Ec { fid: fid as u32 });
+    let mut state = STATE.lock().unwrap();
+    let fid = fid as u32;
+    if let Some((_, caller_fid)) = state.pending_ic {
+        if caller_fid == fid {
+            // Same function entry — whamm ordering artifact: EC before IC
+            let (target_fid, _) = state.pending_ic.take().unwrap();
+            state.trace.push(TraceEvent::Ec { fid });
+            state.trace.push(TraceEvent::Ic { fid: target_fid });
+        } else {
+            // Different function — flush IC first (genuine order), then EC
+            state.flush_pending_ic();
+            state.trace.push(TraceEvent::Ec { fid });
+        }
+    } else {
+        state.trace.push(TraceEvent::Ec { fid });
+    }
 }
 
-/// IC: import call (wasm→host).
+/// IC: import call (wasm→host). Deferred as pending so EC ordering can be fixed.
 #[no_mangle]
-pub fn record_ic(fid: i32) {
+pub fn record_ic(target_fid: i32, caller_fid: i32) {
     let mut state = STATE.lock().unwrap();
-    state.has_had_ic = true;
-    state.trace.push(TraceEvent::Ic { fid: fid as u32 });
+    // Flush any existing pending IC before storing the new one
+    state.flush_pending_ic();
+    state.pending_ic = Some((target_fid as u32, caller_fid as u32));
 }
 
 /// IR: import return (host→wasm return).
 #[no_mangle]
 pub fn record_ir(fid: i32) {
-    STATE.lock().unwrap().trace.push(TraceEvent::Ir { fid: fid as u32 });
+    let mut state = STATE.lock().unwrap();
+    state.flush_pending_ic();
+    state.trace.push(TraceEvent::Ir { fid: fid as u32 });
 }
 
 /// Called before every wasm integer store. Updates shadow.
@@ -106,20 +136,12 @@ pub fn shadow_store(addr: i32, size: i32, value: i64) {
 }
 
 /// Called after every wasm integer load. Emits an L event on shadow mismatch.
-/// Lazy seeding: first read of an untracked address seeds shadow without emitting L.
-/// This avoids false positives from data-section-initialized memory.
 #[no_mangle]
 pub fn check_load(addr: i32, size: i32, value: i64) {
     let addr = addr as u32;
     let size = size as u32;
     let mut state = STATE.lock().unwrap();
-    // Before any IC, lazy-seed untracked addresses to absorb data-section reads.
-    // After IC the host may have written, so we must compare.
-    let all_tracked = (0..size).all(|i| state.shadow.contains_key(&(addr + i)));
-    if !state.has_had_ic && !all_tracked {
-        state.write_shadow(addr, size, value);
-        return;
-    }
+    state.flush_pending_ic();
     let shadow_val = state.read_shadow(addr, size);
     let m = R3MemState::mask(size);
     let masked_value = value & m;
@@ -133,10 +155,26 @@ pub fn check_load(addr: i32, size: i32, value: i64) {
     }
 }
 
+/// Seed shadow memory from a copy of the app's data segments.
+/// `data_ptr` points into r3_mem's own memory where the bytes were copied.
+/// `start_addr` is the starting address in the app's linear memory.
+/// `len` is the number of bytes.
+#[no_mangle]
+pub fn init_shadow(data_ptr: i32, start_addr: i32, len: i32) {
+    let mut state = STATE.lock().unwrap();
+    let start_addr = start_addr as u32;
+    let len = len as u32;
+    for i in 0..len {
+        let byte = unsafe { *((data_ptr as usize + i as usize) as *const u8) };
+        state.shadow.insert(start_addr + i, byte);
+    }
+}
+
 /// Print all recorded events in R3 trace format, interleaved in execution order.
 #[no_mangle]
 pub fn print_trace() {
-    let state = STATE.lock().unwrap();
+    let mut state = STATE.lock().unwrap();
+    state.flush_pending_ic();
     for event in &state.trace {
         match event {
             TraceEvent::Ec { fid } => println!("EC;{};fid;", fid),

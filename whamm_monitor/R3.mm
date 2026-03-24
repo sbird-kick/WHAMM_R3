@@ -11,12 +11,23 @@
 
 use r3_mem;
 
+// ── Shadow memory initialization from data segments ─────────────────────
+var data_len: u32 = active_data_len(APP_MEMID);
+var data_start: u32 = active_data_start(APP_MEMID);
+var ptr: i32 = r3_mem.mem_alloc(data_len as i32);
+memcpy(APP_MEMID, data_start, memid(r3_mem), ptr as u32, data_len);
+
 var call_depth: i32;
 var next_is_external: bool;
+var shadow_inited: bool;
 
 // ── External call detection ───────────────────────────────────────────────
 
 wasm:func:entry /!fname.starts_with("host_")/ {
+    if (!shadow_inited) {
+        shadow_inited = true;
+        r3_mem.init_shadow(ptr, data_start as i32, data_len as i32);
+    }
     if (call_depth == 0 || next_is_external) {
         r3_mem.record_ec(fid as i32);
         next_is_external = false;
@@ -32,13 +43,14 @@ wasm:func:exit /!fname.starts_with("host_")/ {
 // host_* are local wasm functions simulating the host; treat calls to them
 // as IC events and set next_is_external so re-entries are detected as EC.
 
-wasm:opcode:call:before /target_fn_name.starts_with("host_")/ {
+wasm:opcode:call:before /target_fn_name.starts_with("host_") && !fname.starts_with("host_")/ {
     next_is_external = true;
-    r3_mem.record_ic(imm0 as i32);
+    r3_mem.record_ic(imm0 as i32, fid as i32);
 }
 
-// NOTE: wasm:opcode:call:after has a whamm codegen bug (local.get beyond
-// declared locals for void-returning calls). IR events are skipped for now.
+wasm:opcode:call:after /target_fn_name.starts_with("host_") && !fname.starts_with("host_")/ {
+    r3_mem.record_ir(imm0 as i32);
+}
 
 // ── Shadow updates: track every integer wasm store (non-host only) ────────
 
