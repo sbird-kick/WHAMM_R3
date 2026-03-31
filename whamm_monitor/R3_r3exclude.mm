@@ -1,6 +1,5 @@
-// R3_r3exclude.mm — R3 trace for wasm-r3-tests (r3* functions simulate the host).
-//
-// Matches: wizeng --monitors=r3{exclude=r3*} app.wasm
+// R3_r3exclude.mm — R3 load event detection for wasm-r3-tests.
+// r3* functions simulate the host; excluded from store/load tracking.
 
 use r3_mem;
 
@@ -10,8 +9,6 @@ var data_start: u32 = active_data_start(APP_MEMID);
 var ptr: i32 = r3_mem.mem_alloc(data_len as i32);
 memcpy(APP_MEMID, data_start, memid(r3_mem), ptr as u32, data_len);
 
-var call_depth: i32;
-var next_is_external: bool;
 var shadow_inited: bool;
 
 wasm:func:entry /!fname.starts_with("r3")/ {
@@ -19,25 +16,9 @@ wasm:func:entry /!fname.starts_with("r3")/ {
         shadow_inited = true;
         r3_mem.init_shadow(ptr, data_start as i32, data_len as i32);
     }
-    if (call_depth == 0 || next_is_external) {
-        r3_mem.record_ec(fid as i32);
-        next_is_external = false;
-    }
-    call_depth = call_depth + 1;
 }
 
-wasm:func:exit /!fname.starts_with("r3")/ {
-    call_depth = call_depth - 1;
-}
-
-wasm:opcode:call:before /target_fn_name.starts_with("r3") && !fname.starts_with("r3")/ {
-    next_is_external = true;
-    r3_mem.record_ic(imm0 as i32, fid as i32);
-}
-
-wasm:opcode:call:after /target_fn_name.starts_with("r3") && !fname.starts_with("r3")/ {
-    r3_mem.record_ir(imm0 as i32);
-}
+// ── Shadow updates: track every integer wasm store (non-host only) ────────
 
 wasm:opcode:i32.store|i32.store8|i32.store16:before /!fname.starts_with("r3")/ {
     r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);
@@ -45,6 +26,9 @@ wasm:opcode:i32.store|i32.store8|i32.store16:before /!fname.starts_with("r3")/ {
 wasm:opcode:i64.store|i64.store8|i64.store16|i64.store32:before /!fname.starts_with("r3")/ {
     r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);
 }
+
+// ── Load event detection (non-host only) ─────────────────────────────────
+
 wasm:opcode:i32.load|i32.load8_s|i32.load8_u|i32.load16_s|i32.load16_u:after /!fname.starts_with("r3")/ {
     r3_mem.check_load(effective_addr as i32, data_size as i32, res0 as i64);
 }

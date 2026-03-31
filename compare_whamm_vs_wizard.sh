@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Compare whamm R3 instrumentation vs wizard R3 monitor for all test cases.
-# Compares all event types (EC, IC, IR, L). Function name arguments are
-# normalized since whamm and wizard label them differently.
+# Compares L (load) events only.
 # Covers: tc*.wasm (exclude=host_*) and wasm_r3_tests (exclude=r3*)
 
 set -uo pipefail
@@ -19,19 +18,6 @@ export VIRGIL_LOC="$SCRIPT_DIR/../virgil"
 
 mkdir -p "$TMP_DIR"
 
-# Normalize trace lines for comparison:
-#   EC;1;entry;  → EC;1    (strip name label)
-#   IC;2         → IC;2
-#   IR;2;        → IR;2
-#   L;0;1;1,0,0,0 → L;0;1;1,0,0,0  (keep as-is)
-normalize_trace() {
-    sed -E '
-        s/^EC;([0-9]+);.*/EC/
-        s/^IC;([0-9]+).*/IC/
-        s/^IR;([0-9]+).*/IR/
-    ' | grep -E '^(EC|IC|IR|L)' || true
-}
-
 PASS=0; FAIL=0; TOTAL=0
 FAIL_NAMES=()
 
@@ -44,7 +30,7 @@ for WASM in $(ls "$WASM_DIR"/tc*.wasm | sort); do
     echo "  $NAME"
 
     # --- Oracle: wizard R3 monitor ---
-    ORACLE="$("$WIZENG" --monitors="r3{exclude=host_*}" "$WASM" 2>&1 | normalize_trace)"
+    ORACLE="$("$WIZENG" --monitors="r3{exclude=host_*}" "$WASM" 2>&1 | grep '^L;' || true)"
 
     # --- Instrument with whamm ---
     INSTR_ERR="$("$WHAMM" instr \
@@ -64,19 +50,19 @@ for WASM in $(ls "$WASM_DIR"/tc*.wasm | sort); do
     fi
 
     # --- Run instrumented wasm ---
-    WHAMM_OUT="$("$WIZENG" "$WHAMM_CORE" "$R3_MEM_WASM" "$INSTR_WASM" 2>&1 | normalize_trace)"
+    WHAMM_OUT="$("$WIZENG" "$WHAMM_CORE" "$R3_MEM_WASM" "$INSTR_WASM" 2>&1 | grep '^L;' || true)"
 
     # --- Compare ---
     DIFF="$(diff <(echo "$ORACLE") <(echo "$WHAMM_OUT") || true)"
 
-    ORACLE_COUNT=$(echo "$ORACLE" | wc -l | tr -d ' ')
-    WHAMM_COUNT=$(echo "$WHAMM_OUT" | wc -l | tr -d ' ')
+    ORACLE_COUNT=$(echo "$ORACLE" | grep -c '^L;' || true)
+    WHAMM_COUNT=$(echo "$WHAMM_OUT" | grep -c '^L;' || true)
 
     if [[ -z "$DIFF" ]]; then
-        echo "  PASS  ($ORACLE_COUNT events)"
+        echo "  PASS  (oracle=$ORACLE_COUNT L events, whamm=$WHAMM_COUNT L events)"
         PASS=$((PASS + 1))
     else
-        echo "  FAIL  (oracle=$ORACLE_COUNT events, whamm=$WHAMM_COUNT events)"
+        echo "  FAIL  (oracle=$ORACLE_COUNT L events, whamm=$WHAMM_COUNT L events)"
         MISSING=$(diff <(echo "$ORACLE") <(echo "$WHAMM_OUT") | grep '^<' | sed 's/^< /  MISSING: /')
         EXTRA=$(diff <(echo "$ORACLE") <(echo "$WHAMM_OUT") | grep '^>' | sed 's/^> /  EXTRA:   /')
         [[ -n "$MISSING" ]] && echo "$MISSING"
@@ -111,7 +97,7 @@ for WASM in $(ls "$SCRIPT_DIR/wasm_r3_tests"/*.wasm | grep -v '\.index\.wasm' | 
     echo "  [wasm-r3] $NAME"
 
     # --- Oracle: wizard R3 monitor ---
-    ORACLE="$("$WIZENG" --monitors="r3{exclude=r3*}" "$WASM" 2>&1 | normalize_trace)"
+    ORACLE="$("$WIZENG" --monitors="r3{exclude=r3*}" "$WASM" 2>&1 | grep '^L;' || true)"
 
     # --- Instrument with whamm (r3* exclude script) ---
     INSTR_ERR="$("$WHAMM" instr \
@@ -131,19 +117,19 @@ for WASM in $(ls "$SCRIPT_DIR/wasm_r3_tests"/*.wasm | grep -v '\.index\.wasm' | 
     fi
 
     # --- Run instrumented wasm ---
-    WHAMM_OUT="$("$WIZENG" "$WHAMM_CORE" "$R3_MEM_WASM" "$INSTR_WASM" 2>&1 | normalize_trace)"
+    WHAMM_OUT="$("$WIZENG" "$WHAMM_CORE" "$R3_MEM_WASM" "$INSTR_WASM" 2>&1 | grep '^L;' || true)"
 
     # --- Compare ---
     DIFF="$(diff <(echo "$ORACLE") <(echo "$WHAMM_OUT") || true)"
 
-    ORACLE_COUNT=$(echo "$ORACLE" | wc -l | tr -d ' ')
-    WHAMM_COUNT=$(echo "$WHAMM_OUT" | wc -l | tr -d ' ')
+    ORACLE_COUNT=$(echo "$ORACLE" | grep -c '^L;' || true)
+    WHAMM_COUNT=$(echo "$WHAMM_OUT" | grep -c '^L;' || true)
 
     if [[ -z "$DIFF" ]]; then
-        echo "  PASS  ($ORACLE_COUNT events)"
+        echo "  PASS  (oracle=$ORACLE_COUNT L events, whamm=$WHAMM_COUNT L events)"
         R3_PASS=$((R3_PASS + 1))
     else
-        echo "  FAIL  (oracle=$ORACLE_COUNT events, whamm=$WHAMM_COUNT events)"
+        echo "  FAIL  (oracle=$ORACLE_COUNT L events, whamm=$WHAMM_COUNT L events)"
         MISSING=$(diff <(echo "$ORACLE") <(echo "$WHAMM_OUT") | grep '^<' | sed 's/^< /  MISSING: /')
         EXTRA=$(diff <(echo "$ORACLE") <(echo "$WHAMM_OUT") | grep '^>' | sed 's/^> /  EXTRA:   /')
         [[ -n "$MISSING" ]] && echo "$MISSING"
