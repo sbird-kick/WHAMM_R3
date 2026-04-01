@@ -236,6 +236,9 @@ fn emit_script(info: &WasmInfo, excluded: &[u32]) {
 
     // call_depth variable
     println!("var call_depth: i32;");
+    // call_indirect tracking
+    println!("var tracking_indirect: bool;");
+    println!("var indirect_target_fid: i32 = -1;");
     println!();
 
     // Per-function entry probes: EC check + call_depth increment
@@ -252,6 +255,9 @@ fn emit_script(info: &WasmInfo, excluded: &[u32]) {
 
     // IR probes
     emit_ir_probes(info, excluded);
+
+    // call_indirect IC/IR probes
+    emit_call_indirect_probes(info, excluded);
 
     // Store/load probes
     emit_shadow_probes(&pred);
@@ -421,6 +427,86 @@ fn emit_ir_probes(info: &WasmInfo, excluded: &[u32]) {
         }
         println!("    r3_mem.end_ir();");
         println!("    call_depth = call_depth + 1;");
+        println!("}}");
+    }
+}
+
+fn emit_call_indirect_probes(info: &WasmInfo, excluded: &[u32]) {
+    if excluded.is_empty() { return; }
+
+    let excluded_pred = make_fid_predicate(excluded);
+
+    println!();
+    println!("// ── call_indirect IC/IR detection ────────────────");
+
+    // Step 1: call_indirect:before — set tracking flag
+    println!("wasm:opcode:call_indirect:before {{");
+    println!("    tracking_indirect = true;");
+    println!("}}");
+
+    // Step 2: func:entry on excluded functions — if tracking, emit IC
+    println!("wasm:func:entry / {} / {{", excluded_pred);
+    println!("    if (tracking_indirect) {{");
+    println!("        r3_mem.record_ic(fid as i32);");
+    println!("        indirect_target_fid = fid as i32;");
+    println!("        call_depth = call_depth - 1;");
+    println!("        tracking_indirect = false;");
+    println!("    }}");
+    println!("}}");
+
+    // Step 3: func:entry on NON-excluded — clear flag (target wasn't excluded)
+    let non_excluded_pred: Vec<String> = excluded.iter()
+        .map(|id| format!("fid != {}", id))
+        .collect();
+    println!("wasm:func:entry / {} / {{", non_excluded_pred.join(" && "));
+    println!("    if (tracking_indirect) {{");
+    println!("        tracking_indirect = false;");
+    println!("        indirect_target_fid = -1;");
+    println!("    }}");
+    println!("}}");
+
+    // Step 4: call_indirect:after — if we tracked an excluded target, emit IR
+    // Group excluded functions by return type for resN bounds
+    let mut groups: HashMap<Vec<ValType>, Vec<u32>> = HashMap::new();
+    for &fid in excluded {
+        let (_, results) = info.get_func_type(fid);
+        groups.entry(results.clone()).or_default().push(fid);
+    }
+
+    let mut sorted: Vec<_> = groups.into_iter().collect();
+    sorted.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.1.cmp(&b.1)));
+
+    // Emit one call_indirect:after per return-type group.
+    // Void group goes LAST so typed probes get first chance to match.
+    let mut void_group = false;
+    for (results, _fids) in &sorted {
+        if results.is_empty() {
+            void_group = true;
+            continue;
+        }
+        let binds: Vec<String> = results.iter().enumerate()
+            .map(|(i, vt)| format!("res{}: {}", i, valtype_to_whamm(vt)))
+            .collect();
+        println!("wasm:opcode:call_indirect({}):after {{", binds.join(", "));
+        println!("    if (indirect_target_fid != -1) {{");
+        println!("        r3_mem.begin_ir(indirect_target_fid);");
+        for (i, vt) in results.iter().enumerate() {
+            println!("        r3_mem.{}(res{});", valtype_to_ir_fn(vt), i);
+        }
+        println!("        r3_mem.end_ir();");
+        println!("        call_depth = call_depth + 1;");
+        println!("        indirect_target_fid = -1;");
+        println!("    }}");
+        println!("}}");
+    }
+    if void_group {
+        println!("wasm:opcode:call_indirect:after {{");
+        println!("    if (indirect_target_fid != -1) {{");
+        println!("        r3_mem.begin_ir(indirect_target_fid);");
+        println!("        r3_mem.end_ir();");
+        println!("        call_depth = call_depth + 1;");
+        println!("        indirect_target_fid = -1;");
+        println!("    }}");
         println!("}}");
     }
 }
