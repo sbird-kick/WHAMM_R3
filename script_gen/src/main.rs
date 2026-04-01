@@ -1,6 +1,6 @@
 use std::env;
 use std::collections::HashMap;
-use wasmparser::{Parser, Payload, Name, ValType, TypeRef, ExternalKind, CompositeInnerType, Operator};
+use wasmparser::{Parser, Payload, Name, ValType, TypeRef, ExternalKind, CompositeInnerType};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -34,7 +34,6 @@ struct WasmInfo {
     import_type_indices: Vec<u32>,
     local_type_indices: Vec<u32>,
     exports: Vec<(String, u32)>,
-    first_call_targets: HashMap<u32, u32>,  // local func fid → call target fid (if first instr is call)
 }
 
 impl WasmInfo {
@@ -51,9 +50,6 @@ impl WasmInfo {
         func_index < self.num_imports
     }
 
-    fn exported_fids(&self) -> Vec<u32> {
-        self.exports.iter().map(|(_, fid)| *fid).collect()
-    }
 }
 
 fn parse_wasm(bytes: &[u8]) -> WasmInfo {
@@ -64,10 +60,7 @@ fn parse_wasm(bytes: &[u8]) -> WasmInfo {
         import_type_indices: Vec::new(),
         local_type_indices: Vec::new(),
         exports: Vec::new(),
-        first_call_targets: HashMap::new(),
     };
-
-    let mut code_func_index: u32 = 0;  // tracks local function index in code section
 
     for payload in Parser::new(0).parse_all(bytes) {
         match payload {
@@ -129,17 +122,6 @@ fn parse_wasm(bytes: &[u8]) -> WasmInfo {
                         }
                     }
                 }
-            }
-            Ok(Payload::CodeSectionEntry(body)) => {
-                let fid = info.num_imports + code_func_index;
-                if let Ok(mut ops) = body.get_operators_reader() {
-                    if let Ok(first_op) = ops.read() {
-                        if let Operator::Call { function_index } = first_op {
-                            info.first_call_targets.insert(fid, function_index);
-                        }
-                    }
-                }
-                code_func_index += 1;
             }
             _ => {}
         }
@@ -257,8 +239,7 @@ fn emit_script(info: &WasmInfo, excluded: &[u32]) {
     println!();
 
     // Per-function entry probes: EC check + call_depth increment
-    // Returns fids that have combined EC+IC probes (collision workaround)
-    let collision_fids = emit_entry_probes(info, excluded);
+    emit_entry_probes(info, excluded);
 
     // call_depth decrement on exit
     println!();
@@ -266,8 +247,8 @@ fn emit_script(info: &WasmInfo, excluded: &[u32]) {
     println!("    call_depth = call_depth - 1;");
     println!("}}");
 
-    // IC probes (exclude collision fids to avoid double-firing)
-    emit_ic_probes(excluded, &collision_fids);
+    // IC probes
+    emit_ic_probes(excluded);
 
     // IR probes
     emit_ir_probes(info, excluded);
@@ -314,7 +295,7 @@ fn emit_name_registration(info: &WasmInfo) {
     println!();
 }
 
-fn emit_entry_probes(info: &WasmInfo, excluded: &[u32]) -> Vec<u32> {
+fn emit_entry_probes(info: &WasmInfo, excluded: &[u32]) {
     // Collect exported fids (non-excluded, non-import)
     let mut export_fids: Vec<u32> = Vec::new();
     for (_, func_index) in &info.exports {
@@ -325,33 +306,17 @@ fn emit_entry_probes(info: &WasmInfo, excluded: &[u32]) -> Vec<u32> {
         }
     }
 
-    // Total non-excluded local function count
+    // All non-excluded local functions
     let total_local = info.local_type_indices.len() as u32;
     let all_local_fids: Vec<u32> = (info.num_imports..info.num_imports + total_local)
         .filter(|fid| !excluded.contains(fid))
         .collect();
-
-    // Detect collision: exported fids whose first instruction is call <excluded>
-    let collision_fids: Vec<u32> = export_fids.iter()
-        .filter(|&&fid| {
-            info.first_call_targets.get(&fid)
-                .map_or(false, |target| excluded.contains(target))
-        })
-        .copied()
-        .collect();
-
-    let imm0_pred = if !excluded.is_empty() {
-        make_imm0_predicate(excluded)
-    } else {
-        String::new()
-    };
 
     println!("// ── Per-function entry: EC + call_depth ──────────");
 
     // Exported functions: EC check + call_depth increment
     for &fid in &export_fids {
         let (params, _) = info.get_func_type(fid);
-        let is_collision = collision_fids.contains(&fid);
 
         let ty_bounds = if params.is_empty() {
             String::new()
@@ -362,18 +327,10 @@ fn emit_entry_probes(info: &WasmInfo, excluded: &[u32]) -> Vec<u32> {
             format!("({})", binds.join(", "))
         };
 
-        if is_collision {
-            // Combined EC+IC probe using opcode:call:before to avoid wildcard ordering bug
-            println!(
-                "wasm{}:opcode:call:before / opidx == 0 && fid == {} / {{",
-                ty_bounds, fid
-            );
-        } else {
-            println!(
-                "wasm{}:opcode:*:before / opidx == 0 && fid == {} / {{",
-                ty_bounds, fid
-            );
-        }
+        println!(
+            "wasm{}:opcode:*:before / opidx == 0 && fid == {} / {{",
+            ty_bounds, fid
+        );
         println!("    if (call_depth == 0) {{");
         println!("        r3_mem.begin_ec(fid as i32);");
         for (i, vt) in params.iter().enumerate() {
@@ -382,13 +339,6 @@ fn emit_entry_probes(info: &WasmInfo, excluded: &[u32]) -> Vec<u32> {
         println!("        r3_mem.end_ec();");
         println!("    }}");
         println!("    call_depth = call_depth + 1;");
-        if is_collision {
-            // Inline IC handling for the collision case
-            println!("    if ({}) {{", imm0_pred);
-            println!("        r3_mem.record_ic(imm0 as i32);");
-            println!("        call_depth = call_depth - 1;");
-            println!("    }}");
-        }
         println!("}}");
     }
 
@@ -407,22 +357,15 @@ fn emit_entry_probes(info: &WasmInfo, excluded: &[u32]) -> Vec<u32> {
         println!("    call_depth = call_depth + 1;");
         println!("}}");
     }
-
-    collision_fids
 }
 
-fn emit_ic_probes(excluded: &[u32], collision_fids: &[u32]) {
+fn emit_ic_probes(excluded: &[u32]) {
     if excluded.is_empty() { return; }
 
     let target = make_imm0_predicate(excluded);
-    // Exclude both excluded functions (they can't be callers) and collision fids
-    // (IC is already handled in their combined EC+IC probe)
-    let mut caller_excludes: Vec<String> = excluded.iter()
+    let caller_excludes: Vec<String> = excluded.iter()
         .map(|id| format!("fid != {}", id))
         .collect();
-    for &fid in collision_fids {
-        caller_excludes.push(format!("fid != {}", fid));
-    }
 
     println!();
     println!("// ── IC (Import Call) event detection ─────────────");
