@@ -15,6 +15,7 @@ enum TraceEvent {
     ImportCall { fid: u32 },
     ImportReturn { fid: u32, results: Vec<ParamValue> },
     GlobalGet { idx: u32, formatted: String },
+    ImportGlobal { idx: u32, formatted: String },
 }
 
 struct EventBuilder { event_type: i32, fid: u32, params: Vec<ParamValue> }
@@ -222,13 +223,41 @@ pub fn record_ic(fid: i32) {
     STATE.lock().unwrap().trace.push(TraceEvent::ImportCall { fid: fid as u32 });
 }
 
+#[no_mangle]
+pub fn record_ig_i32(idx: i32, val: i32) {
+    STATE.lock().unwrap().trace.push(TraceEvent::ImportGlobal { idx: idx as u32, formatted: format!("{}", val) });
+}
+#[no_mangle]
+pub fn record_ig_i64(idx: i32, val: i64) {
+    STATE.lock().unwrap().trace.push(TraceEvent::ImportGlobal { idx: idx as u32, formatted: format!("{}", val) });
+}
+#[no_mangle]
+pub fn record_ig_f32(idx: i32, val: f32) {
+    STATE.lock().unwrap().trace.push(TraceEvent::ImportGlobal { idx: idx as u32, formatted: format!("0x{:X}", val.to_bits()) });
+}
+#[no_mangle]
+pub fn record_ig_f64(idx: i32, val: f64) {
+    STATE.lock().unwrap().trace.push(TraceEvent::ImportGlobal { idx: idx as u32, formatted: format!("0x{:X}", val.to_bits()) });
+}
+
 // ── Output ───────────────────────────────────────────────────────────────
 
 #[no_mangle]
 pub fn print_trace() {
     let s = STATE.lock().unwrap();
+
+    // Pass 1: IG events first, sorted by global index
+    let mut igs: Vec<(&u32, &String)> = s.trace.iter().filter_map(|ev| match ev {
+        TraceEvent::ImportGlobal { idx, formatted } => Some((idx, formatted)),
+        _ => None,
+    }).collect();
+    igs.sort_by_key(|(idx, _)| *idx);
+    for (idx, formatted) in igs { println!("IG;{};{}", idx, formatted); }
+
+    // Pass 2: everything else in order
     for ev in &s.trace {
         match ev {
+            TraceEvent::ImportGlobal { .. } => {}
             TraceEvent::Load { addr, bytes } => {
                 let v: Vec<String> = bytes.iter().map(|b| b.to_string()).collect();
                 println!("L;0;{};{}", addr, v.join(","));

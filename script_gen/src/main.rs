@@ -33,6 +33,7 @@ struct WasmInfo {
     func_names: HashMap<u32, String>,
     types: Vec<(Vec<ValType>, Vec<ValType>)>,
     num_imports: u32,
+    num_imported_globals: u32,
     import_type_indices: Vec<u32>,
     local_type_indices: Vec<u32>,
     exports: Vec<(String, u32)>,
@@ -54,11 +55,10 @@ impl WasmInfo {
 
 fn parse_wasm(bytes: &[u8]) -> WasmInfo {
     let mut w = WasmInfo {
-        func_names: HashMap::new(), types: Vec::new(), num_imports: 0,
+        func_names: HashMap::new(), types: Vec::new(), num_imports: 0, num_imported_globals: 0,
         import_type_indices: Vec::new(), local_type_indices: Vec::new(),
         exports: Vec::new(), exported_globals: Vec::new(), globals: Vec::new(),
     };
-    let mut num_imported_globals: u32 = 0;
     for payload in Parser::new(0).parse_all(bytes) {
         match payload {
             Ok(Payload::TypeSection(r)) => for rg in r {
@@ -74,8 +74,8 @@ fn parse_wasm(bytes: &[u8]) -> WasmInfo {
                 match imp.ty {
                     TypeRef::Func(ti) => { w.import_type_indices.push(ti); w.num_imports += 1; }
                     TypeRef::Global(gt) => {
-                        w.globals.push(GlobalInfo { idx: num_imported_globals, valtype: gt.content_type, mutable_: gt.mutable, init_i64: None });
-                        num_imported_globals += 1;
+                        w.globals.push(GlobalInfo { idx: w.num_imported_globals, valtype: gt.content_type, mutable_: gt.mutable, init_i64: None });
+                        w.num_imported_globals += 1;
                     }
                     _ => {}
                 }
@@ -177,9 +177,10 @@ fn emit_script(info: &WasmInfo, excluded: &[u32]) {
     // Preamble
     println!("// Auto-generated R3 monitor.\n// Excluded: {:?}\n\nuse r3_mem;\n", excluded);
 
-    emit_preamble(info, excluded);
+    emit_preamble(info);
+    emit_ig_probes(info);
     emit_entry_probes(info, excluded);
-    emit_direct_call_probes(info, excluded, &epred, &npred);
+    emit_direct_call_probes(info, excluded, &npred);
     emit_indirect_call_probes(info, excluded, &npred);
     emit_global_probes(info, excluded);
     emit_shadow_probes(&epred);
@@ -187,7 +188,7 @@ fn emit_script(info: &WasmInfo, excluded: &[u32]) {
     println!("\nwasm:report {{\n    r3_mem.print_trace();\n}}");
 }
 
-fn emit_preamble(info: &WasmInfo, excluded: &[u32]) {
+fn emit_preamble(info: &WasmInfo) {
     // Shadow memory init
     println!("var data_len: u32 = active_data_len(APP_MEMID);");
     println!("var data_start: u32 = active_data_start(APP_MEMID);");
@@ -215,7 +216,32 @@ fn emit_preamble(info: &WasmInfo, excluded: &[u32]) {
     println!("\nvar call_depth: i32;");
     println!("var tracking_indirect: bool;");
     println!("var indirect_target_fid: i32 = -1;\n");
-    let _ = excluded; // used by callers
+}
+
+fn ig_fn(t: &ValType) -> &'static str {
+    match t { ValType::I32=>"record_ig_i32", ValType::I64=>"record_ig_i64",
+              ValType::F32=>"record_ig_f32", ValType::F64=>"record_ig_f64", _=>"record_ig_i32" }
+}
+
+fn check_fn(t: &ValType) -> &'static str {
+    match t { ValType::I32=>"check_global_i32", ValType::I64=>"check_global_i64",
+              ValType::F32=>"check_global_f32", ValType::F64=>"check_global_f64", _=>"check_global_i32" }
+}
+
+fn emit_ig_probes(info: &WasmInfo) {
+    let imported: Vec<&GlobalInfo> = info.globals.iter()
+        .filter(|g| g.idx < info.num_imported_globals).collect();
+    if imported.is_empty() { return; }
+
+    println!("// ── IG (ImportedGlobal) events ────────────────────");
+    for g in &imported {
+        let (t, idx) = (vt(&g.valtype), g.idx);
+        println!("var ig_done_{idx}: bool;");
+        println!("wasm:opcode:global.get(res0: {t}):after / imm0 == {idx} && !ig_done_{idx} / {{");
+        println!("    ig_done_{idx} = true;");
+        println!("    r3_mem.{}({idx} as i32, res0);", ig_fn(&g.valtype));
+        println!("    r3_mem.shadow_global_set({idx} as i32, res0 as i64);\n}}\n");
+    }
 }
 
 fn emit_entry_probes(info: &WasmInfo, excluded: &[u32]) {
@@ -245,7 +271,7 @@ fn emit_entry_probes(info: &WasmInfo, excluded: &[u32]) {
     println!("\nwasm:func:exit{} {{\n    call_depth = call_depth - 1;\n}}\n", exclude_pred(excluded));
 }
 
-fn emit_direct_call_probes(info: &WasmInfo, excluded: &[u32], epred: &str, npred: &str) {
+fn emit_direct_call_probes(info: &WasmInfo, excluded: &[u32], npred: &str) {
     if excluded.is_empty() { return; }
 
     // IC
@@ -258,7 +284,6 @@ fn emit_direct_call_probes(info: &WasmInfo, excluded: &[u32], epred: &str, npred
         emit_event(1, "imm0 as i32", "res", &results, "    ");
         println!("    call_depth = call_depth + 1;\n}}\n");
     }
-    let _ = epred;
 }
 
 fn emit_indirect_call_probes(info: &WasmInfo, excluded: &[u32], npred: &str) {
@@ -298,8 +323,10 @@ fn emit_indirect_call_probes(info: &WasmInfo, excluded: &[u32], npred: &str) {
 }
 
 fn emit_global_probes(info: &WasmInfo, excluded: &[u32]) {
+    // Track exported mutable globals AND imported mutable globals
     let mut_globals: Vec<&GlobalInfo> = info.globals.iter()
-        .filter(|g| g.mutable_ && info.exported_globals.contains(&g.idx)).collect();
+        .filter(|g| g.mutable_ && (info.exported_globals.contains(&g.idx) || g.idx < info.num_imported_globals))
+        .collect();
     if mut_globals.is_empty() { return; }
 
     let mut by_type: HashMap<ValType, Vec<u32>> = HashMap::new();
@@ -307,17 +334,14 @@ fn emit_global_probes(info: &WasmInfo, excluded: &[u32]) {
 
     println!("\n// ── G (Global) events ────────────────────────────");
     for (valtype, idxs) in &by_type {
-        let (t, check_fn) = (vt(valtype), match valtype {
-            ValType::I32=>"check_global_i32", ValType::I64=>"check_global_i64",
-            ValType::F32=>"check_global_f32", ValType::F64=>"check_global_f64", _=>"check_global_i32",
-        });
+        let t = vt(valtype);
         let pred = if excluded.is_empty() { eq_pred("imm0", idxs) }
             else { format!("{} && ({})", neq_pred(excluded), eq_pred("imm0", idxs)) };
 
         println!("wasm:opcode:global.set(arg0: {t}):before / {pred} / {{");
         println!("    r3_mem.shadow_global_set(imm0 as i32, arg0 as i64);\n}}");
         println!("wasm:opcode:global.get(res0: {t}):after / {pred} / {{");
-        println!("    r3_mem.{check_fn}(imm0 as i32, res0);\n}}");
+        println!("    r3_mem.{}(imm0 as i32, res0);\n}}", check_fn(valtype));
     }
 }
 
