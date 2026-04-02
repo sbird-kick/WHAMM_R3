@@ -1,5 +1,5 @@
 use std::env;
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeSet};
 use wasmparser::{Parser, Payload, Name, ValType, TypeRef, ExternalKind, CompositeInnerType};
 
 fn main() {
@@ -25,7 +25,7 @@ fn main() {
     emit_script(&info, &excluded);
 }
 
-// ── Wasm info ────────────────────────────────────────────────────────────
+// ── Wasm parsing ─────────────────────────────────────────────────────────
 
 struct GlobalInfo { idx: u32, valtype: ValType, mutable_: bool, init_i64: Option<i64> }
 
@@ -55,8 +55,8 @@ impl WasmInfo {
 fn parse_wasm(bytes: &[u8]) -> WasmInfo {
     let mut w = WasmInfo {
         func_names: HashMap::new(), types: Vec::new(), num_imports: 0,
-        import_type_indices: Vec::new(), local_type_indices: Vec::new(), exports: Vec::new(), exported_globals: Vec::new(),
-        globals: Vec::new(),
+        import_type_indices: Vec::new(), local_type_indices: Vec::new(),
+        exports: Vec::new(), exported_globals: Vec::new(), globals: Vec::new(),
     };
     let mut num_imported_globals: u32 = 0;
     for payload in Parser::new(0).parse_all(bytes) {
@@ -74,34 +74,23 @@ fn parse_wasm(bytes: &[u8]) -> WasmInfo {
                 match imp.ty {
                     TypeRef::Func(ti) => { w.import_type_indices.push(ti); w.num_imports += 1; }
                     TypeRef::Global(gt) => {
-                        w.globals.push(GlobalInfo {
-                            idx: num_imported_globals,
-                            valtype: gt.content_type,
-                            mutable_: gt.mutable,
-                            init_i64: None,
-                        });
+                        w.globals.push(GlobalInfo { idx: num_imported_globals, valtype: gt.content_type, mutable_: gt.mutable, init_i64: None });
                         num_imported_globals += 1;
                     }
                     _ => {}
                 }
             },
-            Ok(Payload::FunctionSection(r)) => for ti in r {
-                w.local_type_indices.push(ti.expect("func"));
-            },
+            Ok(Payload::FunctionSection(r)) => for ti in r { w.local_type_indices.push(ti.expect("func")); },
             Ok(Payload::GlobalSection(r)) => for g in r {
                 let g = g.expect("global");
                 let idx = w.globals.len() as u32;
-                // Extract init value from const expr
                 let mut init_i64 = None;
-                let mut ops = g.init_expr.get_operators_reader();
-                if let Ok(op) = ops.read() {
+                if let Ok(op) = g.init_expr.get_operators_reader().read() {
                     init_i64 = match op {
                         wasmparser::Operator::I32Const { value } => Some(value as i64),
                         wasmparser::Operator::I64Const { value } => Some(value),
-                        wasmparser::Operator::F32Const { value } =>
-                            Some(f32::from_bits(value.bits()) .to_bits() as i64),
-                        wasmparser::Operator::F64Const { value } =>
-                            Some(f64::from_bits(value.bits()).to_bits() as i64),
+                        wasmparser::Operator::F32Const { value } => Some(f32::from_bits(value.bits()).to_bits() as i64),
+                        wasmparser::Operator::F64Const { value } => Some(f64::from_bits(value.bits()).to_bits() as i64),
                         _ => None,
                     };
                 }
@@ -126,49 +115,39 @@ fn parse_wasm(bytes: &[u8]) -> WasmInfo {
     w
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────
-
 fn find_excluded(names: &HashMap<u32, String>, pattern: &str) -> Vec<u32> {
     let pfx = pattern.trim_end_matches('*');
     let mut ids: Vec<u32> = names.iter().filter(|(_, n)| n.starts_with(pfx)).map(|(id, _)| *id).collect();
     ids.sort(); ids
 }
 
-fn pred(var: &str, fids: &[u32]) -> String {
-    fids.iter().map(|id| format!("{} == {}", var, id)).collect::<Vec<_>>().join(" || ")
+// ── Predicate helpers ────────────────────────────────────────────────────
+
+fn eq_pred(var: &str, fids: &[u32]) -> String {
+    fids.iter().map(|id| format!("{var} == {id}")).collect::<Vec<_>>().join(" || ")
+}
+
+fn neq_pred(fids: &[u32]) -> String {
+    fids.iter().map(|id| format!("fid != {id}")).collect::<Vec<_>>().join(" && ")
 }
 
 fn exclude_pred(excluded: &[u32]) -> String {
-    if excluded.is_empty() { String::new() }
-    else { format!(" /{}/", excluded.iter().map(|id| format!("fid != {}", id)).collect::<Vec<_>>().join(" && ")) }
+    if excluded.is_empty() { String::new() } else { format!(" /{}/", neq_pred(excluded)) }
 }
+
+// ── ValType helpers ──────────────────────────────────────────────────────
 
 fn vt(t: &ValType) -> &'static str {
     match t { ValType::I32=>"i32", ValType::I64=>"i64", ValType::F32=>"f32", ValType::F64=>"f64", _=>"i32" }
 }
 
-fn param_fn(t: &ValType) -> &'static str {
+fn pfn(t: &ValType) -> &'static str {
     match t { ValType::I32=>"param_i32", ValType::I64=>"param_i64", ValType::F32=>"param_f32", ValType::F64=>"param_f64", _=>"param_i32" }
 }
 
-fn ty_bounds_local(params: &[ValType]) -> String {
-    if params.is_empty() { String::new() }
-    else { format!("({})", params.iter().enumerate().map(|(i, t)| format!("local{}: {}", i, vt(t))).collect::<Vec<_>>().join(", ")) }
-}
-
-fn ty_bounds_res(results: &[ValType]) -> String {
-    if results.is_empty() { String::new() }
-    else { format!("({})", results.iter().enumerate().map(|(i, t)| format!("res{}: {}", i, vt(t))).collect::<Vec<_>>().join(", ")) }
-}
-
-/// Emit begin_event + param calls + end_event for EC (type=0) or IR (type=1).
-/// `vars` are "local0", "local1"... or "res0", "res1"... with their types.
-fn emit_event_body(event_type: i32, fid_expr: &str, vars: &[(&str, &ValType)], indent: &str) {
-    println!("{}r3_mem.begin_event({}, {} as i32);", indent, fid_expr, event_type);
-    for (name, t) in vars {
-        println!("{}r3_mem.{}({});", indent, param_fn(t), name);
-    }
-    println!("{}r3_mem.end_event();", indent);
+fn ty_bounds(prefix: &str, types: &[ValType]) -> String {
+    if types.is_empty() { String::new() }
+    else { format!("({})", types.iter().enumerate().map(|(i, t)| format!("{prefix}{i}: {}", vt(t))).collect::<Vec<_>>().join(", ")) }
 }
 
 /// Group fids by return type signature.
@@ -181,34 +160,49 @@ fn group_by_results(info: &WasmInfo, fids: &[u32]) -> Vec<(Vec<ValType>, Vec<u32
     sorted
 }
 
+// ── Event body emission ──────────────────────────────────────────────────
+
+fn emit_event(event_type: i32, fid_expr: &str, prefix: &str, types: &[ValType], indent: &str) {
+    println!("{indent}r3_mem.begin_event({fid_expr}, {event_type} as i32);");
+    for (i, t) in types.iter().enumerate() { println!("{indent}r3_mem.{}({prefix}{i});", pfn(t)); }
+    println!("{indent}r3_mem.end_event();");
+}
+
 // ── Script emission ──────────────────────────────────────────────────────
 
 fn emit_script(info: &WasmInfo, excluded: &[u32]) {
     let epred = exclude_pred(excluded);
+    let npred = neq_pred(excluded);
 
-    println!("// Auto-generated R3 monitor.");
-    println!("// Excluded function IDs: {:?}\n", excluded);
-    println!("use r3_mem;\n");
+    // Preamble
+    println!("// Auto-generated R3 monitor.\n// Excluded: {:?}\n\nuse r3_mem;\n", excluded);
 
-    // Shadow init
+    emit_preamble(info, excluded);
+    emit_entry_probes(info, excluded);
+    emit_direct_call_probes(info, excluded, &epred, &npred);
+    emit_indirect_call_probes(info, excluded, &npred);
+    emit_global_probes(info, excluded);
+    emit_shadow_probes(&epred);
+
+    println!("\nwasm:report {{\n    r3_mem.print_trace();\n}}");
+}
+
+fn emit_preamble(info: &WasmInfo, excluded: &[u32]) {
+    // Shadow memory init
     println!("var data_len: u32 = active_data_len(APP_MEMID);");
     println!("var data_start: u32 = active_data_start(APP_MEMID);");
     println!("var ptr: i32 = r3_mem.mem_alloc(data_len as i32);");
     println!("memcpy(APP_MEMID, data_start, memid(r3_mem), ptr as u32, data_len);");
     println!("report var _shadow: i32 = r3_mem.init_shadow(ptr, data_start as i32, data_len as i32);");
 
-    // Shadow global init (non-zero initial values, exported globals only)
+    // Shadow global init (exported mutable globals with non-zero init)
     for g in info.globals.iter().filter(|g| g.mutable_ && info.exported_globals.contains(&g.idx)) {
         if let Some(val) = g.init_i64 {
-            if val != 0 {
-                println!("var _gi{}: i32 = r3_mem.shadow_global_set({} as i32, {} as i64);",
-                    g.idx, g.idx, val);
-            }
+            if val != 0 { println!("r3_mem.shadow_global_set({} as i32, {} as i64);", g.idx, val); }
         }
     }
-    println!();
 
-    // Name registration
+    // Export name registration
     for (i, (name, fid)) in info.exports.iter().enumerate() {
         let esc = name.replace('\\', "\\\\").replace('"', "\\\"");
         println!("report var _n{i}: str = \"{esc}\";");
@@ -221,21 +215,22 @@ fn emit_script(info: &WasmInfo, excluded: &[u32]) {
     println!("\nvar call_depth: i32;");
     println!("var tracking_indirect: bool;");
     println!("var indirect_target_fid: i32 = -1;\n");
+    let _ = excluded; // used by callers
+}
 
-    // Per-function entry: EC + call_depth
+fn emit_entry_probes(info: &WasmInfo, excluded: &[u32]) {
     let export_fids: Vec<u32> = info.exports.iter()
         .map(|(_, fid)| *fid).filter(|fid| !info.is_import(*fid) && !excluded.contains(fid))
-        .collect::<Vec<_>>().into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        .collect::<BTreeSet<_>>().into_iter().collect();
 
+    // Exported: EC check + call_depth
     for &fid in &export_fids {
         let (params, _) = info.func_type(fid);
-        let vars: Vec<_> = params.iter().enumerate().map(|(i, t)| (format!("local{}", i), t)).collect();
-        println!("wasm{}:opcode:*:before / opidx == 0 && fid == {} / {{", ty_bounds_local(params), fid);
+        println!("wasm{}:opcode:*:before / opidx == 0 && fid == {fid} / {{", ty_bounds("local", params));
         println!("    if (call_depth == 0) {{");
-        emit_event_body(0, "fid as i32", &vars.iter().map(|(n, t)| (n.as_str(), *t)).collect::<Vec<_>>(), "        ");
+        emit_event(0, "fid as i32", "local", params, "        ");
         println!("    }}");
-        println!("    call_depth = call_depth + 1;");
-        println!("}}");
+        println!("    call_depth = call_depth + 1;\n}}");
     }
 
     // Non-exported non-excluded: just call_depth
@@ -243,163 +238,100 @@ fn emit_script(info: &WasmInfo, excluded: &[u32]) {
     let non_export: Vec<u32> = (info.num_imports..info.num_imports + total)
         .filter(|f| !excluded.contains(f) && !export_fids.contains(f)).collect();
     if !non_export.is_empty() {
-        println!("wasm:opcode:*:before / opidx == 0 && ({}) / {{", pred("fid", &non_export));
-        println!("    call_depth = call_depth + 1;");
-        println!("}}");
+        println!("wasm:opcode:*:before / opidx == 0 && ({}) / {{\n    call_depth = call_depth + 1;\n}}", eq_pred("fid", &non_export));
     }
 
     // func:exit
-    println!("\nwasm:func:exit{} {{", epred);
-    println!("    call_depth = call_depth - 1;");
-    println!("}}\n");
+    println!("\nwasm:func:exit{} {{\n    call_depth = call_depth - 1;\n}}\n", exclude_pred(excluded));
+}
 
-    // IC (direct call)
-    if !excluded.is_empty() {
-        println!("wasm:opcode:call:before / ({}) && {} / {{",
-            pred("imm0", excluded),
-            excluded.iter().map(|id| format!("fid != {}", id)).collect::<Vec<_>>().join(" && "));
-        println!("    r3_mem.record_ic(imm0 as i32);");
-        println!("    call_depth = call_depth - 1;");
-        println!("}}\n");
+fn emit_direct_call_probes(info: &WasmInfo, excluded: &[u32], epred: &str, npred: &str) {
+    if excluded.is_empty() { return; }
+
+    // IC
+    println!("wasm:opcode:call:before / ({}) && {npred} / {{", eq_pred("imm0", excluded));
+    println!("    r3_mem.record_ic(imm0 as i32);\n    call_depth = call_depth - 1;\n}}\n");
+
+    // IR (grouped by return type)
+    for (results, fids) in group_by_results(info, excluded) {
+        println!("wasm:opcode:call{}:after / ({}) && {npred} / {{", ty_bounds("res", &results), eq_pred("imm0", &fids));
+        emit_event(1, "imm0 as i32", "res", &results, "    ");
+        println!("    call_depth = call_depth + 1;\n}}\n");
     }
+    let _ = epred;
+}
 
-    // IR (direct call:after)
-    if !excluded.is_empty() {
-        let caller_pred = excluded.iter().map(|id| format!("fid != {}", id)).collect::<Vec<_>>().join(" && ");
-        for (results, fids) in group_by_results(info, excluded) {
-            let vars: Vec<_> = results.iter().enumerate().map(|(i, t)| (format!("res{}", i), t)).collect();
-            println!("wasm:opcode:call{}:after / ({}) && {} / {{",
-                ty_bounds_res(&results), pred("imm0", &fids), caller_pred);
-            emit_event_body(1, "imm0 as i32", &vars.iter().map(|(n, t)| (n.as_str(), *t)).collect::<Vec<_>>(), "    ");
-            println!("    call_depth = call_depth + 1;");
-            println!("}}\n");
-        }
+fn emit_indirect_call_probes(info: &WasmInfo, excluded: &[u32], npred: &str) {
+    if excluded.is_empty() { return; }
+
+    // call_indirect:before — set tracking flag
+    println!("wasm:opcode:call_indirect:before {{\n    tracking_indirect = true;\n}}");
+
+    // func:entry on excluded — detect indirect IC
+    println!("wasm:func:entry / {} / {{", eq_pred("fid", excluded));
+    println!("    if (tracking_indirect) {{");
+    println!("        r3_mem.record_ic(fid as i32);");
+    println!("        indirect_target_fid = fid as i32;");
+    println!("        call_depth = call_depth - 1;");
+    println!("        tracking_indirect = false;\n    }}\n}}");
+
+    // func:entry on non-excluded — clear flag
+    println!("wasm:func:entry / {npred} / {{");
+    println!("    if (tracking_indirect) {{\n        tracking_indirect = false;\n        indirect_target_fid = -1;\n    }}\n}}\n");
+
+    // call_indirect:after — typed first, void last
+    let groups = group_by_results(info, excluded);
+    let (void, typed): (Vec<_>, Vec<_>) = groups.iter().partition(|(r, _)| r.is_empty());
+
+    for (results, _) in &typed {
+        println!("wasm:opcode:call_indirect{}:after {{", ty_bounds("res", results));
+        println!("    if (indirect_target_fid != -1) {{");
+        emit_event(1, "indirect_target_fid", "res", results, "        ");
+        println!("        call_depth = call_depth + 1;\n        indirect_target_fid = -1;\n    }}\n}}");
     }
-
-    // call_indirect IC/IR
-    if !excluded.is_empty() {
-        println!("wasm:opcode:call_indirect:before {{");
-        println!("    tracking_indirect = true;");
-        println!("}}");
-
-        println!("wasm:func:entry / {} / {{", pred("fid", excluded));
-        println!("    if (tracking_indirect) {{");
-        println!("        r3_mem.record_ic(fid as i32);");
-        println!("        indirect_target_fid = fid as i32;");
-        println!("        call_depth = call_depth - 1;");
-        println!("        tracking_indirect = false;");
-        println!("    }}");
-        println!("}}");
-
-        println!("wasm:func:entry / {} / {{",
-            excluded.iter().map(|id| format!("fid != {}", id)).collect::<Vec<_>>().join(" && "));
-        println!("    if (tracking_indirect) {{");
-        println!("        tracking_indirect = false;");
-        println!("        indirect_target_fid = -1;");
-        println!("    }}");
-        println!("}}\n");
-
-        // call_indirect:after — typed first, void last
-        let groups = group_by_results(info, excluded);
-        let mut void_group = false;
-        for (results, _) in &groups {
-            if results.is_empty() { void_group = true; continue; }
-            let vars: Vec<_> = results.iter().enumerate().map(|(i, t)| (format!("res{}", i), t)).collect();
-            println!("wasm:opcode:call_indirect{}:after {{", ty_bounds_res(results));
-            println!("    if (indirect_target_fid != -1) {{");
-            emit_event_body(1, "indirect_target_fid", &vars.iter().map(|(n, t)| (n.as_str(), *t)).collect::<Vec<_>>(), "        ");
-            println!("        call_depth = call_depth + 1;");
-            println!("        indirect_target_fid = -1;");
-            println!("    }}");
-            println!("}}");
-        }
-        if void_group {
-            println!("wasm:opcode:call_indirect:after {{");
-            println!("    if (indirect_target_fid != -1) {{");
-            emit_event_body(1, "indirect_target_fid", &[], "        ");
-            println!("        call_depth = call_depth + 1;");
-            println!("        indirect_target_fid = -1;");
-            println!("    }}");
-            println!("}}");
-        }
+    if !void.is_empty() {
+        println!("wasm:opcode:call_indirect:after {{");
+        println!("    if (indirect_target_fid != -1) {{");
+        emit_event(1, "indirect_target_fid", "res", &[], "        ");
+        println!("        call_depth = call_depth + 1;\n        indirect_target_fid = -1;\n    }}\n}}");
     }
-
-    // Global shadow (G events)
-    emit_global_probes(info, excluded);
-
-    // Bulk memory shadow updates
-    println!("\nwasm:opcode:memory.grow:after{epred} {{");
-    println!("    r3_mem.shadow_grow(res0, arg0 as i32);");
-    println!("}}");
-    // memory.fill stack: dest, val, len → arg2=dest, arg1=val, arg0=len
-    println!("wasm:opcode:memory.fill:before{epred} {{");
-    println!("    r3_mem.shadow_fill(arg2 as i32, arg1 as i32, arg0 as i32);");
-    println!("}}");
-    // memory.copy stack: dest, src, len → arg2=dest, arg1=src, arg0=len
-    println!("wasm:opcode:memory.copy:before{epred} {{");
-    println!("    r3_mem.shadow_copy(arg2 as i32, arg1 as i32, arg0 as i32);");
-    println!("}}");
-
-    // Shadow store/load
-    println!("\nwasm:opcode:i32.store|i32.store8|i32.store16:before{epred} {{");
-    println!("    r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);");
-    println!("}}");
-    println!("wasm:opcode:i64.store|i64.store8|i64.store16|i64.store32:before{epred} {{");
-    println!("    r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);");
-    println!("}}");
-    println!("wasm:opcode:i32.load|i32.load8_s|i32.load8_u|i32.load16_s|i32.load16_u:after{epred} {{");
-    println!("    r3_mem.check_load(effective_addr as i32, data_size as i32, res0 as i64);");
-    println!("}}");
-    println!("wasm:opcode:i64.load|i64.load8_s|i64.load8_u|i64.load16_s|i64.load16_u|i64.load32_s|i64.load32_u:after{epred} {{");
-    println!("    r3_mem.check_load(effective_addr as i32, data_size as i32, res0 as i64);");
-    println!("}}\n");
-
-    println!("wasm:report {{");
-    println!("    r3_mem.print_trace();");
-    println!("}}");
 }
 
 fn emit_global_probes(info: &WasmInfo, excluded: &[u32]) {
     let mut_globals: Vec<&GlobalInfo> = info.globals.iter()
-        .filter(|g| g.mutable_ && info.exported_globals.contains(&g.idx))
-        .collect();
+        .filter(|g| g.mutable_ && info.exported_globals.contains(&g.idx)).collect();
     if mut_globals.is_empty() { return; }
 
-    // Group mutable globals by type
     let mut by_type: HashMap<ValType, Vec<u32>> = HashMap::new();
-    for g in &mut_globals {
-        by_type.entry(g.valtype).or_default().push(g.idx);
-    }
+    for g in &mut_globals { by_type.entry(g.valtype).or_default().push(g.idx); }
 
-    println!("\n// ── G (Global) event detection ───────────────────");
-
+    println!("\n// ── G (Global) events ────────────────────────────");
     for (valtype, idxs) in &by_type {
-        let idx_pred = pred("imm0", idxs);
-        let t = vt(valtype);
-        let check_fn = match valtype {
-            ValType::I32 => "check_global_i32",
-            ValType::I64 => "check_global_i64",
-            ValType::F32 => "check_global_f32",
-            ValType::F64 => "check_global_f64",
-            _ => "check_global_i32",
-        };
+        let (t, check_fn) = (vt(valtype), match valtype {
+            ValType::I32=>"check_global_i32", ValType::I64=>"check_global_i64",
+            ValType::F32=>"check_global_f32", ValType::F64=>"check_global_f64", _=>"check_global_i32",
+        });
+        let pred = if excluded.is_empty() { eq_pred("imm0", idxs) }
+            else { format!("{} && ({})", neq_pred(excluded), eq_pred("imm0", idxs)) };
 
-        // Combined predicate: exclude + index filter
-        let full_pred = if excluded.is_empty() {
-            format!(" / {} /", idx_pred)
-        } else {
-            let excl = excluded.iter().map(|id| format!("fid != {}", id)).collect::<Vec<_>>().join(" && ");
-            format!(" / {} && ({}) /", excl, idx_pred)
-        };
-
-        // global.set:before — update shadow (dummy var workaround for whamm bug)
-        println!("wasm:opcode:global.set(arg0: {}):before{} {{", t, full_pred);
-        println!("    var _d: i32 = r3_mem.shadow_global_set(imm0 as i32, arg0 as i64);");
-        println!("}}");
-
-        // global.get:after — compare and emit G on mismatch
-        println!("wasm:opcode:global.get(res0: {}):after{} {{", t, full_pred);
-        println!("    r3_mem.{}(imm0 as i32, res0);", check_fn);
-        println!("}}");
+        println!("wasm:opcode:global.set(arg0: {t}):before / {pred} / {{");
+        println!("    r3_mem.shadow_global_set(imm0 as i32, arg0 as i64);\n}}");
+        println!("wasm:opcode:global.get(res0: {t}):after / {pred} / {{");
+        println!("    r3_mem.{check_fn}(imm0 as i32, res0);\n}}");
     }
+}
+
+fn emit_shadow_probes(epred: &str) {
+    println!("\nwasm:opcode:memory.grow:after{epred} {{\n    r3_mem.shadow_grow(res0, arg0 as i32);\n}}");
+    println!("wasm:opcode:memory.fill:before{epred} {{\n    r3_mem.shadow_fill(arg2 as i32, arg1 as i32, arg0 as i32);\n}}");
+    println!("wasm:opcode:memory.copy:before{epred} {{\n    r3_mem.shadow_copy(arg2 as i32, arg1 as i32, arg0 as i32);\n}}");
+
+    println!("\nwasm:opcode:i32.store|i32.store8|i32.store16:before{epred} {{");
+    println!("    r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);\n}}");
+    println!("wasm:opcode:i64.store|i64.store8|i64.store16|i64.store32:before{epred} {{");
+    println!("    r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);\n}}");
+    println!("wasm:opcode:i32.load|i32.load8_s|i32.load8_u|i32.load16_s|i32.load16_u:after{epred} {{");
+    println!("    r3_mem.check_load(effective_addr as i32, data_size as i32, res0 as i64);\n}}");
+    println!("wasm:opcode:i64.load|i64.load8_s|i64.load8_u|i64.load16_s|i64.load16_u|i64.load32_s|i64.load32_u:after{epred} {{");
+    println!("    r3_mem.check_load(effective_addr as i32, data_size as i32, res0 as i64);\n}}");
 }

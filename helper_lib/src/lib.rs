@@ -135,11 +135,10 @@ fn ensure_globals(s: &mut State, idx: u32) {
 }
 
 #[no_mangle]
-pub fn shadow_global_set(idx: i32, val: i64) -> i32 {
+pub fn shadow_global_set(idx: i32, val: i64) {
     let mut s = STATE.lock().unwrap();
     ensure_globals(&mut s, idx as u32);
     s.shadow_globals[idx as usize] = val;
-    0
 }
 
 #[no_mangle]
