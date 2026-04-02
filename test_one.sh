@@ -19,10 +19,10 @@ TMP="/tmp/r3_test_$$_${NAME}"
     --output-path "${TMP}_instr.wasm" 2>/dev/null || { echo "FAIL $NAME (instr)"; rm -f "${TMP}"*; exit 0; }
 
 ORACLE=$("$WIZENG" --monitors="r3{exclude=r3*}" "$WASM" 2>&1 \
-    | grep -E '^(L|EC|IC|IR);' || true)
+    | grep -E '^(L|EC|IC|IR|G);' || true)
 
 OURS=$("$WIZENG" "$WHAMM_CORE" "$R3_MEM" "${TMP}_instr.wasm" 2>&1 \
-    | grep -E '^(L|EC|IC|IR);' || true)
+    | grep -E '^(L|EC|IC|IR|G);' || true)
 
 rm -f "${TMP}"*
 
