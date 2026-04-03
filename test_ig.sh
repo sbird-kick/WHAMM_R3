@@ -26,10 +26,10 @@ TMP="/tmp/r3_ig_$$_${NAME}"
 
 # Oracle: deduplicate IG events (wizard bug in multi-module mode)
 ORACLE=$("$WIZENG" --monitors="r3" "$HOST" "$WASM" 2>&1 \
-    | grep -E '^(L|EC|IC|IR|G|IG);' | awk '!seen[$0]++' || true)
+    | grep -E '^(L|EC|IC|IR|G|MG|IG);' | awk '!seen[$0]++' || true)
 
 OURS=$("$WIZENG" "$WHAMM_CORE" "$R3_MEM" "$HOST" "${TMP}_instr.wasm" 2>&1 \
-    | grep -E '^(L|EC|IC|IR|G|IG);' || true)
+    | grep -E '^(L|EC|IC|IR|G|MG|IG);' || true)
 
 rm -f "${TMP}"*
 

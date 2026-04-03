@@ -16,6 +16,7 @@ enum TraceEvent {
     ImportReturn { fid: u32, results: Vec<ParamValue> },
     GlobalGet { idx: u32, formatted: String },
     ImportGlobal { idx: u32, formatted: String },
+    MemGrow { mem_idx: u32, pages: u32 },
 }
 
 struct EventBuilder { event_type: i32, fid: u32, params: Vec<ParamValue> }
@@ -28,11 +29,12 @@ struct State {
     trace: Vec<TraceEvent>,
     building: Option<EventBuilder>,
     names: HashMap<u32, String>,
+    pending_mg: Vec<(u32, u32)>,  // (mem_idx, pages) — deferred until next IR/EC
 }
 
 static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
     shadow: Vec::new(), shadow_globals: Vec::new(), trace: Vec::new(),
-    building: None, names: HashMap::new(),
+    building: None, names: HashMap::new(), pending_mg: Vec::new(),
 }));
 
 fn mask(size: u32) -> i64 {
@@ -212,8 +214,16 @@ pub fn end_event() {
     let mut s = STATE.lock().unwrap();
     if let Some(b) = s.building.take() {
         match b.event_type {
-            0 => s.trace.push(TraceEvent::ExternalCall { fid: b.fid, params: b.params }),
-            _ => s.trace.push(TraceEvent::ImportReturn { fid: b.fid, results: b.params }),
+            0 => {
+                // EC: push EC first, then flush pending MG (oracle: EC then checkMemGrow)
+                s.trace.push(TraceEvent::ExternalCall { fid: b.fid, params: b.params });
+                flush_mg(&mut s);
+            }
+            _ => {
+                // IR: push IR first, then flush pending MG (oracle: IR then checkMemGrow)
+                s.trace.push(TraceEvent::ImportReturn { fid: b.fid, results: b.params });
+                flush_mg(&mut s);
+            }
         }
     }
 }
@@ -238,6 +248,17 @@ pub fn record_ig_f32(idx: i32, val: f32) {
 #[no_mangle]
 pub fn record_ig_f64(idx: i32, val: f64) {
     STATE.lock().unwrap().trace.push(TraceEvent::ImportGlobal { idx: idx as u32, formatted: format!("0x{:X}", val.to_bits()) });
+}
+
+#[no_mangle]
+pub fn record_mg(mem_idx: i32, pages: i32) {
+    STATE.lock().unwrap().pending_mg.push((mem_idx as u32, pages as u32));
+}
+
+fn flush_mg(s: &mut State) {
+    for (mem_idx, pages) in s.pending_mg.drain(..) {
+        s.trace.push(TraceEvent::MemGrow { mem_idx, pages });
+    }
 }
 
 // ── Output ───────────────────────────────────────────────────────────────
@@ -268,6 +289,7 @@ pub fn print_trace() {
                 println!("EC;{};{};{}", fid, name, v.join(","));
             }
             TraceEvent::ImportCall { fid } => println!("IC;{}", fid),
+            TraceEvent::MemGrow { mem_idx, pages } => println!("MG;{};{}", mem_idx, pages),
             TraceEvent::GlobalGet { idx, formatted } => println!("G;{};{}", idx, formatted),
             TraceEvent::ImportReturn { fid, results } => {
                 let v: Vec<String> = results.iter().map(fmt_param).collect();
