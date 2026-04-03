@@ -584,9 +584,16 @@ Two C/C++ tests are excluded because Wizard's own R3 monitor crashes on them (`A
 
 ## Known Limitations
 
-- **MG host API limitation**: MG events are only detected when excluded *wasm* functions call `memory.grow`. If the actual host (JavaScript, WASI runtime) grows memory via the host API, there is no wasm instruction to instrument and the MG will be missed.
-- **T (TableGet) events**: No shadow table tracking. Would detect host modifications to table entries, similar to how L events detect host modifications to memory.
-- **TC (TableCall) events**: Host calling wasm through a table entry (like EC but via indirect dispatch from the host). Would require knowing which table entries the host modified.
+### whamm limitations blocking further event coverage
+
+Two categories of R3 events are blocked by missing whamm functionality. Once whamm adds support, these can be implemented with the same shadow-and-compare pattern used for L and G events.
+
+**MG (MemoryGrow) — host API grows not detectable.** Our MG implementation only detects grows from excluded *wasm* functions (via `memory.grow:after` probes on excluded fids). If the actual host (JavaScript, WASI runtime) grows memory via the host API (e.g., `WebAssembly.Memory.grow()`), there is no wasm instruction to instrument and the MG will be missed. To detect host API grows, we would need whamm to expose `memory.size` as a built-in variable readable from probe bodies at EC entry points — allowing us to compare the current page count against the shadow and emit MG if it grew. whamm currently has no such built-in.
+
+**T/TC/TG (Table events) — funcref operands not exposed.** T events require shadow table tracking: intercept `table.set` to update the shadow, intercept `table.get` to compare against the shadow and detect host modifications. This requires access to the funcref value and the entry index — but whamm does not expose `arg0`/`res0` for `table.get`, `table.set`, or `call_indirect`. Only `imm0` (the table index immediate) is available. Without the entry index and funcref operands, we cannot maintain a shadow table. The `call_indirect` flag pattern (used for IC/IR) gives us the resolved `fid` at `func:entry`, but not the table entry index, which the T event format requires. TC (table calls) and TG (table grows) are blocked by the same limitation. 4 of our 99 wasm-r3 tests produce T events (`table-get`, `table-get-big`, `table-imp-host-mod`, `table-exp-host-mod-multiple`) that we currently cannot match — the test harness excludes T from the grep filter so they appear as PASS.
+
+### Other limitations
+
 - **IG mutable edge case**: If the host modifies a mutable imported global between instantiation and the first wasm `global.get`, the IG event would record the modified value instead of the original instantiation value. In practice this doesn't occur — the host calls an export immediately after instantiation.
 - **Wizard oracle crashes on C++ modules**: Wizard's R3 monitor hits an `ArrayIndexOutOfBoundsException` on `memory.copy` for modules compiled from C++ with heavy STL usage. Our implementation handles these correctly but can't be oracle-verified for those modules.
 - **Wizard multi-module IG duplication**: Wizard's R3 monitor duplicates IG events in multi-module forward mode because `onInstantiate` runs for every module instance but the handler references the last-parsed module's global definitions. Our test harness deduplicates the oracle output.
