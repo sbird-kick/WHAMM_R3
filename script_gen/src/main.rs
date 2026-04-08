@@ -183,7 +183,7 @@ fn emit_script(info: &WasmInfo, excluded: &[u32]) {
     emit_direct_call_probes(info, excluded, &npred);
     emit_indirect_call_probes(info, excluded, &npred);
     emit_global_probes(info, excluded);
-    emit_shadow_probes(&epred, excluded);
+    emit_shadow_probes(&epred);
 
     println!("\nwasm:report {{\n    r3_mem.print_trace();\n}}");
 }
@@ -255,6 +255,8 @@ fn emit_entry_probes(info: &WasmInfo, excluded: &[u32]) {
         println!("wasm{}:opcode:*:before / opidx == 0 && fid == {fid} / {{", ty_bounds("local", params));
         println!("    if (call_depth == 0) {{");
         emit_event(0, "fid as i32", "local", params, "        ");
+        println!("        var _cp: u32 = mem_size(APP_MEMID);");
+        println!("        r3_mem.check_mem_grow(_cp as i32);");
         println!("    }}");
         println!("    call_depth = call_depth + 1;\n}}");
     }
@@ -282,6 +284,8 @@ fn emit_direct_call_probes(info: &WasmInfo, excluded: &[u32], npred: &str) {
     for (results, fids) in group_by_results(info, excluded) {
         println!("wasm:opcode:call{}:after / ({}) && {npred} / {{", ty_bounds("res", &results), eq_pred("imm0", &fids));
         emit_event(1, "imm0 as i32", "res", &results, "    ");
+        println!("        var _cp: u32 = mem_size(APP_MEMID);");
+        println!("        r3_mem.check_mem_grow(_cp as i32);");
         println!("    call_depth = call_depth + 1;\n}}\n");
     }
 }
@@ -312,12 +316,16 @@ fn emit_indirect_call_probes(info: &WasmInfo, excluded: &[u32], npred: &str) {
         println!("wasm:opcode:call_indirect{}:after {{", ty_bounds("res", results));
         println!("    if (indirect_target_fid != -1) {{");
         emit_event(1, "indirect_target_fid", "res", results, "        ");
+        println!("        var _cp: u32 = mem_size(APP_MEMID);");
+        println!("        r3_mem.check_mem_grow(_cp as i32);");
         println!("        call_depth = call_depth + 1;\n        indirect_target_fid = -1;\n    }}\n}}");
     }
     if !void.is_empty() {
         println!("wasm:opcode:call_indirect:after {{");
         println!("    if (indirect_target_fid != -1) {{");
         emit_event(1, "indirect_target_fid", "res", &[], "        ");
+        println!("        var _cp: u32 = mem_size(APP_MEMID);");
+        println!("        r3_mem.check_mem_grow(_cp as i32);");
         println!("        call_depth = call_depth + 1;\n        indirect_target_fid = -1;\n    }}\n}}");
     }
 }
@@ -345,14 +353,10 @@ fn emit_global_probes(info: &WasmInfo, excluded: &[u32]) {
     }
 }
 
-fn emit_shadow_probes(epred: &str, excluded: &[u32]) {
-    // memory.grow: non-excluded just updates shadow, excluded also emits MG
+fn emit_shadow_probes(epred: &str) {
+    // memory.grow in non-excluded code: update shadow memory + shadow page count
+    // (excluded code grows are detected at EC/IR boundaries via check_mem_grow)
     println!("\nwasm:opcode:memory.grow:after{epred} {{\n    r3_mem.shadow_grow(res0, arg0 as i32);\n}}");
-    if !excluded.is_empty() {
-        println!("wasm:opcode:memory.grow:after / {} / {{", eq_pred("fid", excluded));
-        println!("    if (res0 != -1) {{\n        r3_mem.record_mg(0 as i32, arg0 as i32);\n    }}");
-        println!("    r3_mem.shadow_grow(res0, arg0 as i32);\n}}");
-    }
     println!("wasm:opcode:memory.fill:before{epred} {{\n    r3_mem.shadow_fill(arg2 as i32, arg1 as i32, arg0 as i32);\n}}");
     println!("wasm:opcode:memory.copy:before{epred} {{\n    r3_mem.shadow_copy(arg2 as i32, arg1 as i32, arg0 as i32);\n}}");
 

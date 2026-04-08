@@ -29,12 +29,12 @@ struct State {
     trace: Vec<TraceEvent>,
     building: Option<EventBuilder>,
     names: HashMap<u32, String>,
-    pending_mg: Vec<(u32, u32)>,  // (mem_idx, pages) — deferred until next IR/EC
+    shadow_pages: u32,  // tracked page count for MG detection
 }
 
 static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
     shadow: Vec::new(), shadow_globals: Vec::new(), trace: Vec::new(),
-    building: None, names: HashMap::new(), pending_mg: Vec::new(),
+    building: None, names: HashMap::new(), shadow_pages: 0,
 }));
 
 fn mask(size: u32) -> i64 {
@@ -108,8 +108,11 @@ pub fn check_load(addr: i32, size: i32, value: i64) {
 pub fn shadow_grow(old_pages: i32, new_pages: i32) {
     if old_pages < 0 { return; }
     let mut s = STATE.lock().unwrap();
-    let new_size = (old_pages + new_pages) as usize * 65536;
+    let total = (old_pages + new_pages) as u32;
+    let new_size = total as usize * 65536;
     if new_size > s.shadow.len() { s.shadow.resize(new_size, 0); }
+    // Update shadow_pages so check_mem_grow won't false-trigger for wasm-internal grows
+    if total > s.shadow_pages { s.shadow_pages = total; }
 }
 
 #[no_mangle]
@@ -214,16 +217,8 @@ pub fn end_event() {
     let mut s = STATE.lock().unwrap();
     if let Some(b) = s.building.take() {
         match b.event_type {
-            0 => {
-                // EC: push EC first, then flush pending MG (oracle: EC then checkMemGrow)
-                s.trace.push(TraceEvent::ExternalCall { fid: b.fid, params: b.params });
-                flush_mg(&mut s);
-            }
-            _ => {
-                // IR: push IR first, then flush pending MG (oracle: IR then checkMemGrow)
-                s.trace.push(TraceEvent::ImportReturn { fid: b.fid, results: b.params });
-                flush_mg(&mut s);
-            }
+            0 => s.trace.push(TraceEvent::ExternalCall { fid: b.fid, params: b.params }),
+            _ => s.trace.push(TraceEvent::ImportReturn { fid: b.fid, results: b.params }),
         }
     }
 }
@@ -251,13 +246,16 @@ pub fn record_ig_f64(idx: i32, val: f64) {
 }
 
 #[no_mangle]
-pub fn record_mg(mem_idx: i32, pages: i32) {
-    STATE.lock().unwrap().pending_mg.push((mem_idx as u32, pages as u32));
-}
-
-fn flush_mg(s: &mut State) {
-    for (mem_idx, pages) in s.pending_mg.drain(..) {
-        s.trace.push(TraceEvent::MemGrow { mem_idx, pages });
+pub fn check_mem_grow(current_pages: i32) {
+    let mut s = STATE.lock().unwrap();
+    let current = current_pages as u32;
+    if s.shadow_pages == 0 {
+        // First call: initialize without emitting MG
+        s.shadow_pages = current;
+    } else if current > s.shadow_pages {
+        let growth = current - s.shadow_pages;
+        s.trace.push(TraceEvent::MemGrow { mem_idx: 0, pages: growth });
+        s.shadow_pages = current;
     }
 }
 
