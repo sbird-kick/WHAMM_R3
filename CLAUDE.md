@@ -4,7 +4,7 @@ Reimplementing Wizard Engine's R3 replay-recording monitor using whamm bytecode 
 
 ## Test status
 
-**113/113 passing** via `./run_tests.sh` (99 wasm-r3 + 5 IG multi-module + 9 C/C++).
+**117/117 passing** via `./run_tests.sh` (103 wasm-r3 incl. 4 float-memory + 5 IG multi-module + 9 C/C++).
 
 ## Event coverage
 
@@ -13,7 +13,7 @@ Reimplementing Wizard Engine's R3 replay-recording monitor using whamm bytecode 
 | EC (External Call) | Done | Per-function `opidx == 0` probes with call_depth state machine |
 | IC (Import Call) | Done | Direct: `call:before`. Indirect: `call_indirect` → `func:entry` flag pattern |
 | IR (Import Return) | Done | Direct: `call:after` grouped by return type. Indirect: `call_indirect:after` |
-| L (Load) | Done | Shadow memory (`Vec<u8>`), seeded from data segments |
+| L (Load) | Done | Shadow memory (`Vec<u8>`), seeded from data segments. Tracks i32/i64/f32/f64 loads & stores (all sub-word variants). v128/SIMD not tracked (whamm has no v128 type support) |
 | G (Global Get) | Done | Shadow globals (`Vec<i64>`), tracks exported + imported mutable globals |
 | IG (Import Global) | Done | One-shot `global.get:after` per imported global, reordered at print time |
 | MG (Memory Grow) | Done | Uses `mem_size(APP_MEMID)` at EC/IR boundaries to detect any grow (whamm#300 resolved) |
@@ -39,17 +39,19 @@ Reimplementing Wizard Engine's R3 replay-recording monitor using whamm bytecode 
 - **MG via `mem_size()` at boundaries, not `memory.grow:after`.** `check_mem_grow(mem_size(APP_MEMID))` is called at EC entry and after every IR. This detects memory growth regardless of whether it came from excluded wasm code or host API calls. `shadow_grow` (in `memory.grow:after` with exclude predicate) updates `shadow_pages` for non-excluded grows so they don't false-trigger MG. Lazy init: first `check_mem_grow` call sets the baseline without emitting MG (avoids false positives from whamm's own memory setup).
 - **whamm bug: can't nest bound function calls inside user lib call arguments.** `r3_mem.check_mem_grow(mem_size(APP_MEMID))` crashes the verifier. Workaround: `var _cp: u32 = mem_size(APP_MEMID); r3_mem.check_mem_grow(_cp as i32);`
 - **`argN` stack ordering is reversed.** `arg0` = top of stack = last operand pushed. For `memory.fill(dest, val, len)`: `arg0`=len, `arg1`=val, `arg2`=dest.
-- **`report var` fires exactly once** (at first probe activation). Used for one-time init like shadow memory seeding. `var` at script level runs at module init.
+- **`@init` annotation** runs library calls at initialization time. Used for shadow memory seeding (`init_shadow`) and name registration (`register_name`). Replaces the old `report var _x = lib.fn()` hack.
 - **IG events reordered at print time.** Recorded lazily via `global.get:after` (one-shot guard), but printed first (sorted by index) in `print_trace` to match oracle.
 - **Oracle IG duplication in multi-module.** Wizard's `onInstantiate` fires for every loaded module, duplicating IG events. `test_ig.sh` deduplicates with `awk '!seen[$0]++'`.
+- **Float memory probes use `arg0 as i64` / `res0 as i64`.** `f32.store`/`f64.store` have `arg0: f32`/`f64` (the value), and `f32.load`/`f64.load` have `res0: f32`/`f64`. Casting to i64 reinterprets the IEEE 754 bits — exactly what `shadow_store` and `check_load` need for byte extraction. The 4 float tests (`float-load-only`, `float-store-shadow`, `float-mixed`, `float-no-change`) verify both missing-L-event and false-L-event cases.
 
 ## Key files (read order)
 
 1. `README.md` — full documentation (architecture, algorithms, setup, all design decisions)
-2. `script_gen/src/main.rs` — code generator (~370 lines)
-3. `helper_lib/src/lib.rs` — r3_mem runtime library (~280 lines)
-4. `test_one.sh` / `test_c.sh` / `test_ig.sh` — per-suite test harnesses
-5. `run_tests.sh` — combined runner (all 113 tests)
+2. `script_gen/src/main.rs` — code generator (~372 lines)
+3. `helper_lib/src/lib.rs` — r3_mem runtime library (~299 lines)
+4. `test_common.sh` — shared paths for all test harnesses
+5. `test_one.sh` / `test_c.sh` / `test_ig.sh` — per-suite test harnesses
+6. `run_tests.sh` — combined runner (all 117 tests)
 
 ## Build & test
 
@@ -57,14 +59,7 @@ Reimplementing Wizard Engine's R3 replay-recording monitor using whamm bytecode 
 cd WHAMM_R3
 cargo build --manifest-path script_gen/Cargo.toml
 cargo build --manifest-path helper_lib/Cargo.toml --target wasm32-wasip1 --release
-export VIRGIL_LOC=../virgil
-./run_tests.sh    # expects 113/113 PASS
-```
-
-Whamm must be built from latest master (needs `mem_size`/`page_size` support):
-```bash
-cd ../whamm && git pull origin master && cargo build
-cargo build --target wasm32-wasip1 --release -p whamm_core
+./run_tests.sh -j 32    # expects 117/117 PASS (uses wizeng.x86-64-linux --jit)
 ```
 
 ## User preferences

@@ -194,7 +194,7 @@ fn emit_preamble(info: &WasmInfo) {
     println!("var data_start: u32 = active_data_start(APP_MEMID);");
     println!("var ptr: i32 = r3_mem.mem_alloc(data_len as i32);");
     println!("memcpy(APP_MEMID, data_start, memid(r3_mem), ptr as u32, data_len);");
-    println!("report var _shadow: i32 = r3_mem.init_shadow(ptr, data_start as i32, data_len as i32);");
+    println!("@init r3_mem.init_shadow(ptr, data_start as i32, data_len as i32);");
 
     // Shadow global init (exported mutable globals with non-zero init)
     for g in info.globals.iter().filter(|g| g.mutable_ && info.exported_globals.contains(&g.idx)) {
@@ -206,11 +206,11 @@ fn emit_preamble(info: &WasmInfo) {
     // Export name registration
     for (i, (name, fid)) in info.exports.iter().enumerate() {
         let esc = name.replace('\\', "\\\\").replace('"', "\\\"");
-        println!("report var _n{i}: str = \"{esc}\";");
+        println!("var _n{i}: str = \"{esc}\";");
         println!("var _nl{i}: u32 = _n{i}.len();");
         println!("var _np{i}: i32 = r3_mem.mem_alloc(_nl{i} as i32);");
         println!("write_str(memid(r3_mem), _np{i}, _n{i});");
-        println!("report var _nr{i}: i32 = r3_mem.register_name({fid} as i32, _np{i}, _nl{i} as i32);");
+        println!("@init r3_mem.register_name({fid} as i32, _np{i}, _nl{i} as i32);");
     }
 
     println!("\nvar call_depth: i32;");
@@ -364,8 +364,16 @@ fn emit_shadow_probes(epred: &str) {
     println!("    r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);\n}}");
     println!("wasm:opcode:i64.store|i64.store8|i64.store16|i64.store32:before{epred} {{");
     println!("    r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);\n}}");
+    println!("wasm:opcode:f32.store:before{epred} {{");
+    println!("    r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);\n}}");
+    println!("wasm:opcode:f64.store:before{epred} {{");
+    println!("    r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);\n}}");
     println!("wasm:opcode:i32.load|i32.load8_s|i32.load8_u|i32.load16_s|i32.load16_u:after{epred} {{");
     println!("    r3_mem.check_load(effective_addr as i32, data_size as i32, res0 as i64);\n}}");
     println!("wasm:opcode:i64.load|i64.load8_s|i64.load8_u|i64.load16_s|i64.load16_u|i64.load32_s|i64.load32_u:after{epred} {{");
+    println!("    r3_mem.check_load(effective_addr as i32, data_size as i32, res0 as i64);\n}}");
+    println!("wasm:opcode:f32.load:after{epred} {{");
+    println!("    r3_mem.check_load(effective_addr as i32, data_size as i32, res0 as i64);\n}}");
+    println!("wasm:opcode:f64.load:after{epred} {{");
     println!("    r3_mem.check_load(effective_addr as i32, data_size as i32, res0 as i64);\n}}");
 }

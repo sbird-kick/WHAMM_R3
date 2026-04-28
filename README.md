@@ -38,7 +38,7 @@ Value formatting: i32 and i64 are printed as signed decimal. f32 and f64 are pri
 
 - **Wizard Engine** ([github.com/titzer/wizard-engine](https://github.com/titzer/wizard-engine)): A WebAssembly engine written in Virgil. It has a built-in R3 monitor that serves as our oracle — the ground truth for what the correct trace should be. Run with `wizeng --monitors="r3{exclude=pattern}" module.wasm` to get the oracle trace.
 
-- **Virgil** ([github.com/titzer/virgil](https://github.com/titzer/virgil)): The programming language that Wizard is written in. Needed to run Wizard. We use the JVM backend (`wizeng.jvm`), which requires OpenJDK. Set `VIRGIL_LOC` to point to the Virgil checkout.
+- **Virgil** ([github.com/titzer/virgil](https://github.com/titzer/virgil)): The programming language that Wizard is written in. Needed to run Wizard. We use the JVM backend (`wizeng.x86-64-linux --jit`), which requires OpenJDK. Set `VIRGIL_LOC` to point to the Virgil checkout.
 
 - **whamm** ([github.com/ejrgilbert/whamm](https://github.com/ejrgilbert/whamm)): A bytecode instrumentation framework for WebAssembly. You write a `.mm` script describing what to monitor, and whamm rewrites the wasm binary to include your monitoring code. Think of it like DTrace or eBPF, but for wasm. whamm also provides `whamm_core.wasm` — a runtime library needed by instrumented modules.
 
@@ -87,7 +87,7 @@ From this information, script_gen generates a `.mm` whamm script with:
 - IC/IR probes for indirect calls (`call_indirect`) using a flag pattern
 - G probes for exported mutable globals and imported mutable globals (`global.set:before`, `global.get:after`)
 - Bulk memory probes (`memory.grow`, `memory.fill`, `memory.copy`)
-- Shadow store/load probes for all integer load/store instructions
+- Shadow store/load probes for all integer (i32/i64) and float (f32/f64) load/store instructions, including all sub-word variants
 
 **r3_mem** (Rust library compiled to `wasm32-wasip1`, `helper_lib/src/lib.rs`): The runtime helper that the generated probes call. Its internal state:
 
@@ -98,6 +98,7 @@ struct State {
     trace: Vec<TraceEvent>,       // Recorded events in execution order
     building: Option<EventBuilder>, // In-progress EC or IR event (builder pattern for multi-param events)
     names: HashMap<u32, String>,  // Function ID → export name mapping
+    shadow_pages: u32,            // Tracked page count for MG detection
 }
 ```
 
@@ -125,7 +126,7 @@ Exported functions (called by the generated whamm probes):
 | `param_f64` | `(v: f64)` | Add f64 parameter |
 | `end_event` | `()` | Finalize in-progress event, push to trace |
 | `record_ic` | `(fid: i32)` | Record an IC event (no builder needed — just the fid) |
-| `record_mg` | `(mem_idx: i32, pages: i32)` | Record an MG event (deferred until next EC/IR boundary) |
+| `check_mem_grow` | `(current_pages: i32)` | Compare current page count vs shadow; emit MG on growth |
 | `record_ig_i32` | `(idx: i32, val: i32)` | Record an IG event for an imported i32 global |
 | `record_ig_i64` | `(idx: i32, val: i64)` | Record an IG event for an imported i64 global |
 | `record_ig_f32` | `(idx: i32, val: f32)` | Record an IG event for an imported f32 global |
@@ -170,14 +171,14 @@ var data_len: u32 = active_data_len(APP_MEMID);     // total data segment byte r
 var data_start: u32 = active_data_start(APP_MEMID);  // start address of first data segment
 var ptr: i32 = r3_mem.mem_alloc(data_len as i32);     // allocate space in r3_mem's memory
 memcpy(APP_MEMID, data_start, memid(r3_mem), ptr as u32, data_len);  // copy from app memory to r3_mem
-report var _shadow: i32 = r3_mem.init_shadow(ptr, data_start as i32, data_len as i32);  // seed the shadow Vec
+@init r3_mem.init_shadow(ptr, data_start as i32, data_len as i32);   // seed the shadow Vec
 ```
 
-The `report var _shadow = ...` trick ensures `init_shadow` is called exactly once (report variables are initialized on first use).
+The `@init` annotation ensures the library call runs at initialization time.
 
-**Store tracking**: Every `i32.store`, `i32.store8`, `i32.store16`, `i64.store`, etc. in non-excluded functions triggers `shadow_store`, which writes the stored bytes into the shadow Vec at the same address.
+**Store tracking**: Every `i32.store`, `i32.store8`, `i32.store16`, `i64.store`, `f32.store`, `f64.store`, etc. in non-excluded functions triggers `shadow_store`, which writes the stored bytes into the shadow Vec at the same address. For float stores, the probe casts `arg0 as i64` to reinterpret the IEEE 754 bits as an integer for byte extraction.
 
-**Load checking**: Every `i32.load`, `i32.load8_s`, `i32.load8_u`, etc. in non-excluded functions triggers `check_load`. It reads the shadow at the load address, masks both values to the correct width, and compares. On mismatch:
+**Load checking**: Every `i32.load`, `i32.load8_s`, `f32.load`, `f64.load`, etc. in non-excluded functions triggers `check_load`. It reads the shadow at the load address, masks both values to the correct width, and compares. On mismatch:
 1. The loaded bytes are recorded as an L event in the trace.
 2. The shadow is updated with the new value (so subsequent loads of the same address don't re-trigger).
 
@@ -225,11 +226,11 @@ The EC check and call_depth increment happen in the same probe body (single `opc
 **Export name registration**: Script_gen emits string-passing code at script level for each export:
 
 ```mm
-report var _n0: str = "entry";               // declare string constant
-var _nl0: u32 = _n0.len();                    // get length
+var _n0: str = "entry";                        // declare string constant
+var _nl0: u32 = _n0.len();                     // get length
 var _np0: i32 = r3_mem.mem_alloc(_nl0 as i32); // allocate in r3_mem's memory
 write_str(memid(r3_mem), _np0, _n0);           // copy string bytes to r3_mem
-report var _nr0: i32 = r3_mem.register_name(1 as i32, _np0, _nl0 as i32);  // register: fid 1 = "entry"
+@init r3_mem.register_name(1 as i32, _np0, _nl0 as i32);  // register: fid 1 = "entry"
 ```
 
 This uses whamm's `write_str` built-in and the `memid()` function to write string data across module boundaries.
@@ -335,35 +336,32 @@ The check functions compare the loaded value against the shadow. On mismatch, a 
 
 ### MG (Memory Grow) — Host-Triggered Memory Growth
 
-MG events record when the host (excluded code) grows wasm linear memory. Format: `MG;<mem_idx>;<pages>`. When non-excluded wasm code calls `memory.grow`, no MG event is emitted — that's the module growing its own memory, not host interaction.
+MG events record when the host (excluded code or the actual host API) grows wasm linear memory. Format: `MG;<mem_idx>;<pages>`. When non-excluded wasm code calls `memory.grow`, no MG event is emitted — that's the module growing its own memory, not host interaction.
 
-**Detection**: script_gen emits two `memory.grow:after` probes — one for non-excluded code (just updates the shadow), and one for excluded code (records MG and updates the shadow):
+**Detection**: Rather than instrumenting `memory.grow` in excluded code directly, we detect growth by comparing the current memory size against a shadow page count at every EC and IR boundary:
 
 ```mm
-// Non-excluded: shadow update only
-wasm:opcode:memory.grow:after /fid != 0 && fid != 3/ {
-    r3_mem.shadow_grow(res0, arg0 as i32);
-}
+// At EC entry and after every IR:
+var _cp: u32 = mem_size(APP_MEMID);
+r3_mem.check_mem_grow(_cp as i32);
+```
 
-// Excluded: MG event + shadow update
-wasm:opcode:memory.grow:after / fid == 0 || fid == 3 / {
-    if (res0 != -1) {
-        r3_mem.record_mg(0 as i32, arg0 as i32);
-    }
+`mem_size(APP_MEMID)` is a whamm bound function that emits a `memory.size` instruction, returning the current page count. `check_mem_grow` in r3_mem compares this against `shadow_pages`:
+
+- First call: initializes `shadow_pages` without emitting MG (avoids false positives from whamm's own memory setup).
+- Subsequent calls: if `current > shadow_pages`, emits `MG;0;<growth>` and updates `shadow_pages`.
+
+Non-excluded `memory.grow` instructions still update the shadow via a `memory.grow:after` probe:
+
+```mm
+wasm:opcode:memory.grow:after /fid != 0 && fid != 3/ {
     r3_mem.shadow_grow(res0, arg0 as i32);
 }
 ```
 
-The `res0 != -1` guard ensures MG is only recorded when the grow succeeds (`memory.grow` returns -1 on failure, or the old page count on success). `arg0` is the number of pages requested.
+`shadow_grow` updates `shadow_pages` so that wasm-internal grows don't false-trigger MG at the next boundary check.
 
-**Deferred emission for correct ordering**: MG events are not immediately pushed to the trace. Instead, `record_mg` stores them in a `pending_mg` buffer. The pending events are flushed at the next EC or IR boundary — specifically, inside `end_event`:
-
-- For **EC** (type=0): EC is pushed to the trace first, then pending MG events are flushed. This matches the oracle, which calls `checkMemGrow` after recording EC in `onFuncEntry`.
-- For **IR** (type=1): IR is pushed first, then pending MG events are flushed. This matches the oracle, which calls `checkMemGrow` after recording IR in `onCallReturn`.
-
-This deferred approach is necessary because the `memory.grow:after` probe fires while inside the excluded function (before it returns), but the oracle detects memory growth at the boundary when control transitions back to wasm code.
-
-**Scope limitation**: We can only detect MG when excluded *wasm* functions call `memory.grow`. If the actual host (JavaScript, a WASI runtime) grows memory via the host API (e.g., `WebAssembly.Memory.grow()`), there is no wasm instruction to instrument. This matches the wasm-r3 test suite's approach, where "host" behavior is simulated by excluded wasm functions.
+This boundary-based approach detects memory growth regardless of whether it came from excluded wasm code or host API calls (`WebAssembly.Memory.grow()`), since `mem_size` reflects the actual page count at the point of checking.
 
 ## Key Design Decisions
 
@@ -388,9 +386,9 @@ Only globals accessible to the host can produce G events:
 
 Historically, if a module had both i32 and i64 mutable globals, the `global.set(arg0: i32):before` and `global.set(arg0: i64):before` probes triggered a whamm bug where type bounds from one probe were incorrectly applied to sibling probes. This bug is now fixed.
 
-### Why the `report var` trick for one-time initialization
+### Why `@init` for one-time initialization
 
-whamm's `report var x: T = expr;` evaluates `expr` exactly once (at first probe activation) and stores the result. We use this for shadow initialization and name registration — operations that must happen once before any events are recorded. The alternative (`if (!inited) { inited = true; ... }` guard) adds runtime overhead to every probe invocation.
+whamm's `@init` annotation ensures a library call runs at initialization time. We use this for shadow initialization (`init_shadow`) and name registration (`register_name`) — operations that must happen once before any events are recorded.
 
 ### The test suite's "excluded functions" convention
 
@@ -417,7 +415,7 @@ The wasm-r3 test modules simulate host behavior using local wasm functions whose
 ```
 claude-play-space/
 ├── virgil/              # Virgil compiler (set VIRGIL_LOC to this path)
-├── wizard-engine/       # Wizard Engine (JVM backend: bin/wizeng.jvm)
+├── wizard-engine/       # Wizard Engine (JVM backend: bin/wizeng.x86-64-linux --jit)
 ├── whamm/               # whamm instrumentation framework
 │   └── target/
 │       ├── debug/whamm                              # whamm CLI binary
@@ -481,10 +479,10 @@ cat /tmp/gen.mm
     --output-path /tmp/instr.wasm
 
 # Step 3: Run the oracle (Wizard's built-in R3 monitor) to get the expected trace:
-../wizard-engine/bin/wizeng.jvm --monitors="r3{exclude=r3*}" wasm_r3_tests/test01.wasm
+../wizard-engine/bin/wizeng.x86-64-linux --jit --monitors="r3{exclude=r3*}" wasm_r3_tests/test01.wasm
 
 # Step 4: Run our instrumented module to get our trace:
-../wizard-engine/bin/wizeng.jvm \
+../wizard-engine/bin/wizeng.x86-64-linux --jit \
     ../whamm/target/wasm32-wasip1/release/whamm_core.wasm \
     helper_lib/target/wasm32-wasip1/release/r3_mem.wasm \
     /tmp/instr.wasm
@@ -508,7 +506,7 @@ export VIRGIL_LOC=../virgil
 ```
 
 `run_tests.sh` runs three test suites:
-1. **wasm-r3** (99 tests): `test_one.sh` with `--exclude "r3"` — excluded functions simulate the host
+1. **wasm-r3** (103 tests, includes 4 float-memory tests): `test_one.sh` with `--exclude "r3"` — excluded functions simulate the host
 2. **IG** (5 tests): `test_ig.sh` with multi-module pairs (host + consumer)
 3. **C/C++** (9 tests): `test_c.sh` with `--exclude-imports` — actual wasm imports act as host
 
@@ -566,6 +564,8 @@ The IG test cases:
 
 **99/99** wasm-r3 tests pass with exact event matching (L, EC, IC, IR, G, MG events all compared).
 
+**4/4** float-memory tests pass: `float-load-only` (host writes float, wasm reads via f32.load/f64.load), `float-store-shadow` (wasm writes via f32.store, reads via i32.load — verifies no false L events), `float-mixed` (wasm writes f32, host overwrites, wasm reads via f32.load), `float-no-change` (repeated f32.load doesn't duplicate L events).
+
 **5/5** IG (multi-module) tests pass, covering i32/i64/f64 imported globals, zero-init, combined IG+EC+IC+IR events, and mutable imported globals with G events.
 
 **9/9** C/C++ tests pass (2 skipped — `complex` and `fibonacci` crash Wizard's oracle), including programs with:
@@ -580,19 +580,19 @@ The IG test cases:
 
 Two C/C++ tests are excluded because Wizard's own R3 monitor crashes on them (`ArrayIndexOutOfBoundsException` in `onMemoryCopy`): `fibonacci` and `complex`. Our implementation handles them correctly but they can't be oracle-verified.
 
-**Total: 113/113** tests pass across all three suites via `./run_tests.sh`.
+**Total: 117/117** tests pass across all suites via `./run_tests.sh`.
 
 ## Known Limitations
 
 ### whamm limitations blocking further event coverage
 
-Two categories of R3 events are blocked by missing whamm functionality. Once whamm adds support, these can be implemented with the same shadow-and-compare pattern used for L and G events.
-
-**MG (MemoryGrow) — host API grows not detectable.** Our MG implementation only detects grows from excluded *wasm* functions (via `memory.grow:after` probes on excluded fids). If the actual host (JavaScript, WASI runtime) grows memory via the host API (e.g., `WebAssembly.Memory.grow()`), there is no wasm instruction to instrument and the MG will be missed. To detect host API grows, we would need whamm to expose `memory.size` as a built-in variable readable from probe bodies at EC entry points — allowing us to compare the current page count against the shadow and emit MG if it grew. whamm currently has no such built-in. Tracked in [whamm#300](https://github.com/ejrgilbert/whamm/issues/300).
+Table events are blocked by missing whamm functionality. Once whamm adds support, they can be implemented with the same shadow-and-compare pattern used for L and G events.
 
 **T/TC/TG (Table events) — funcref operands not exposed.** T events require shadow table tracking: intercept `table.set` to update the shadow, intercept `table.get` to compare against the shadow and detect host modifications. This requires access to the funcref value and the entry index — but whamm does not expose `arg0`/`res0` for `table.get`, `table.set`, or `call_indirect`. Only `imm0` (the table index immediate) is available. Without the entry index and funcref operands, we cannot maintain a shadow table. The `call_indirect` flag pattern (used for IC/IR) gives us the resolved `fid` at `func:entry`, but not the table entry index, which the T event format requires. TC (table calls) and TG (table grows) are blocked by the same limitation. 4 of our 99 wasm-r3 tests produce T events (`table-get`, `table-get-big`, `table-imp-host-mod`, `table-exp-host-mod-multiple`) that we currently cannot match — the test harness excludes T from the grep filter so they appear as PASS. Tracked in [whamm#299](https://github.com/ejrgilbert/whamm/issues/299).
 
 **call_indirect flag pattern** — our IC/IR detection for indirect calls uses a 3-phase flag pattern (`tracking_indirect` → `func:entry` → `call_indirect:after`) because whamm doesn't expose the resolved function index on `call_indirect`. If whamm adds a `resolved_fid` built-in or similar, the flag pattern can be replaced with a direct predicate. Tracked in [whamm#301](https://github.com/ejrgilbert/whamm/issues/301).
+
+**v128 / SIMD memory operations not tracked.** whamm has no `v128` type support — `WirmType::V128 => unimplemented!()` in the parser, and no `v128.load`/`v128.store` events defined in the YAML provider specs. We can't add shadow tracking for SIMD memory ops without a whamm-side feature for v128 bound variables (likely splitting v128 into two i64s for the user lib ABI). In practice, SIMD memory operations are rare in host-interaction scenarios.
 
 ### Other limitations
 
@@ -615,3 +615,5 @@ This project served as a stress test for whamm. We discovered and reported sever
 5. **`func:entry` vs `call:before` insertion ordering**: When both targeted the same bytecode position (function's first instruction is a call), `call:before` was inserted before `func:entry`, causing IC to fire before EC. Workaround: use `opcode:*:before / opidx == 0 /` for EC instead, keeping both in the opcode probe category where script order applies.
 
 6. **Probe ordering with >2 same-event probes**: Three or more probes on the same `opcode:*:before` event didn't reliably respect script order. Workaround: use per-function probes (one probe per function, each with a specific `fid == N` predicate) instead of grouped probes, so at most one probe matches any given instruction.
+
+7. **Nested bound function call inside user lib argument crashes verifier**: Calling `r3_mem.check_mem_grow(mem_size(APP_MEMID) as i32)` panics at `verifier.rs:807` with `Option::unwrap() on a None value`. Generic — applies to any bound function (e.g. `active_data_len`) nested inside any user library call. Workaround: assign to a temp var first: `var _cp: u32 = mem_size(APP_MEMID); r3_mem.check_mem_grow(_cp as i32);`. Reported but not yet fixed.
