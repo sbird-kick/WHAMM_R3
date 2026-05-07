@@ -293,7 +293,11 @@ fn emit_direct_call_probes(info: &WasmInfo, excluded: &[u32], npred: &str) {
 fn emit_indirect_call_probes(info: &WasmInfo, excluded: &[u32], npred: &str) {
     if excluded.is_empty() { return; }
 
-    // call_indirect:before — set tracking flag
+    // 3-phase flag pattern. We tried using resolved_fid (whamm#301) but it does only
+    // init-time lookups — it doesn't see runtime table modifications, which breaks any
+    // test that uses table.set or host table modification. The flag pattern uses
+    // func:entry, which sees the actual function being entered regardless of how the
+    // table was populated, so it works for all cases.
     println!("wasm:opcode:call_indirect:before {{\n    tracking_indirect = true;\n}}");
 
     // func:entry on excluded — detect indirect IC
@@ -365,15 +369,15 @@ fn emit_shadow_probes(epred: &str) {
     println!("wasm:opcode:i64.store|i64.store8|i64.store16|i64.store32:before{epred} {{");
     println!("    r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);\n}}");
     println!("wasm:opcode:f32.store:before{epred} {{");
-    println!("    r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);\n}}");
+    println!("    r3_mem.shadow_store_f32(effective_addr as i32, arg0);\n}}");
     println!("wasm:opcode:f64.store:before{epred} {{");
-    println!("    r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);\n}}");
+    println!("    r3_mem.shadow_store_f64(effective_addr as i32, arg0);\n}}");
     println!("wasm:opcode:i32.load|i32.load8_s|i32.load8_u|i32.load16_s|i32.load16_u:after{epred} {{");
     println!("    r3_mem.check_load(effective_addr as i32, data_size as i32, res0 as i64);\n}}");
     println!("wasm:opcode:i64.load|i64.load8_s|i64.load8_u|i64.load16_s|i64.load16_u|i64.load32_s|i64.load32_u:after{epred} {{");
     println!("    r3_mem.check_load(effective_addr as i32, data_size as i32, res0 as i64);\n}}");
     println!("wasm:opcode:f32.load:after{epred} {{");
-    println!("    r3_mem.check_load(effective_addr as i32, data_size as i32, res0 as i64);\n}}");
+    println!("    r3_mem.check_load_f32(effective_addr as i32, res0);\n}}");
     println!("wasm:opcode:f64.load:after{epred} {{");
-    println!("    r3_mem.check_load(effective_addr as i32, data_size as i32, res0 as i64);\n}}");
+    println!("    r3_mem.check_load_f64(effective_addr as i32, res0);\n}}");
 }

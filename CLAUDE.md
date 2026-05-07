@@ -42,7 +42,7 @@ Reimplementing Wizard Engine's R3 replay-recording monitor using whamm bytecode 
 - **`@init` annotation** runs library calls at initialization time. Used for shadow memory seeding (`init_shadow`) and name registration (`register_name`). Replaces the old `report var _x = lib.fn()` hack.
 - **IG events reordered at print time.** Recorded lazily via `global.get:after` (one-shot guard), but printed first (sorted by index) in `print_trace` to match oracle.
 - **Oracle IG duplication in multi-module.** Wizard's `onInstantiate` fires for every loaded module, duplicating IG events. `test_ig.sh` deduplicates with `awk '!seen[$0]++'`.
-- **Float memory probes use `arg0 as i64` / `res0 as i64`.** `f32.store`/`f64.store` have `arg0: f32`/`f64` (the value), and `f32.load`/`f64.load` have `res0: f32`/`f64`. Casting to i64 reinterprets the IEEE 754 bits — exactly what `shadow_store` and `check_load` need for byte extraction. The 4 float tests (`float-load-only`, `float-store-shadow`, `float-mixed`, `float-no-change`) verify both missing-L-event and false-L-event cases.
+- **Float memory probes use dedicated `shadow_store_f32`/`shadow_store_f64`/`check_load_f32`/`check_load_f64`.** `arg0 as i64` / `res0 as i64` in whamm probe bodies does **numeric float-to-int conversion** (3.14 → 3), NOT bit reinterpretation. The float-specific r3_mem functions take `f32`/`f64` directly and use Rust's `.to_bits()` for proper IEEE 754 bit reinterpretation. The 4 float tests (`float-load-only`, `float-store-shadow`, `float-mixed`, `float-no-change`) plus `data_segments` (C/C++ with floats) verify both missing-L-event and false-L-event cases.
 
 ## Key files (read order)
 

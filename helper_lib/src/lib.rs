@@ -102,6 +102,28 @@ pub fn check_load(addr: i32, size: i32, value: i64) {
     }
 }
 
+// ── Float store/load (bit-reinterpretation, not numeric conversion) ─────
+
+#[no_mangle]
+pub fn shadow_store_f32(addr: i32, val: f32) {
+    shadow_store(addr, 4, val.to_bits() as i64);
+}
+
+#[no_mangle]
+pub fn shadow_store_f64(addr: i32, val: f64) {
+    shadow_store(addr, 8, val.to_bits() as i64);
+}
+
+#[no_mangle]
+pub fn check_load_f32(addr: i32, val: f32) {
+    check_load(addr, 4, val.to_bits() as i64);
+}
+
+#[no_mangle]
+pub fn check_load_f64(addr: i32, val: f64) {
+    check_load(addr, 8, val.to_bits() as i64);
+}
+
 // ── Bulk memory shadow updates ──────────────────────────────────────────
 
 #[no_mangle]

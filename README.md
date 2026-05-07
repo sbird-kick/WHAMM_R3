@@ -108,8 +108,12 @@ Exported functions (called by the generated whamm probes):
 |----------|-----------|---------|
 | `mem_alloc` | `(len: i32) → i32` | Allocate `len` bytes in r3_mem's memory, return pointer |
 | `init_shadow` | `(data_ptr: i32, start: i32, len: i32) → i32` | Seed shadow from data segment bytes copied into r3_mem's memory |
-| `shadow_store` | `(addr: i32, size: i32, value: i64)` | Update shadow on wasm store |
-| `check_load` | `(addr: i32, size: i32, value: i64)` | Compare loaded value vs shadow; emit L on mismatch |
+| `shadow_store` | `(addr: i32, size: i32, value: i64)` | Update shadow on i32/i64 store |
+| `shadow_store_f32` | `(addr: i32, val: f32)` | Update shadow on f32.store (bit-reinterpretation via `.to_bits()`) |
+| `shadow_store_f64` | `(addr: i32, val: f64)` | Update shadow on f64.store (bit-reinterpretation via `.to_bits()`) |
+| `check_load` | `(addr: i32, size: i32, value: i64)` | Compare loaded value vs shadow; emit L on mismatch (i32/i64) |
+| `check_load_f32` | `(addr: i32, val: f32)` | Same for f32.load (bit-reinterpretation) |
+| `check_load_f64` | `(addr: i32, val: f64)` | Same for f64.load (bit-reinterpretation) |
 | `shadow_grow` | `(old_pages: i32, new_pages: i32)` | Expand shadow after memory.grow |
 | `shadow_fill` | `(dest: i32, val: i32, len: i32)` | Update shadow for memory.fill |
 | `shadow_copy` | `(dest: i32, src: i32, len: i32)` | Update shadow for memory.copy |
@@ -176,9 +180,9 @@ memcpy(APP_MEMID, data_start, memid(r3_mem), ptr as u32, data_len);  // copy fro
 
 The `@init` annotation ensures the library call runs at initialization time.
 
-**Store tracking**: Every `i32.store`, `i32.store8`, `i32.store16`, `i64.store`, `f32.store`, `f64.store`, etc. in non-excluded functions triggers `shadow_store`, which writes the stored bytes into the shadow Vec at the same address. For float stores, the probe casts `arg0 as i64` to reinterpret the IEEE 754 bits as an integer for byte extraction.
+**Store tracking**: Every `i32.store`, `i32.store8`, `i32.store16`, `i64.store`, etc. in non-excluded functions triggers `shadow_store`, which writes the stored bytes into the shadow Vec at the same address. Float stores (`f32.store`, `f64.store`) call dedicated `shadow_store_f32`/`shadow_store_f64` functions that take the float value directly and use Rust's `.to_bits()` for proper IEEE 754 bit reinterpretation. **Note**: `arg0 as i64` in whamm probe bodies does numeric float-to-int conversion (3.14 → 3), not bit reinterpretation, so the dedicated float functions are required.
 
-**Load checking**: Every `i32.load`, `i32.load8_s`, `f32.load`, `f64.load`, etc. in non-excluded functions triggers `check_load`. It reads the shadow at the load address, masks both values to the correct width, and compares. On mismatch:
+**Load checking**: Every `i32.load`, `i32.load8_s`, etc. in non-excluded functions triggers `check_load`. Float loads (`f32.load`, `f64.load`) call dedicated `check_load_f32`/`check_load_f64` that take the float result directly and use `.to_bits()`. Both ultimately read the shadow at the load address, mask to the correct width, and compare. On mismatch:
 1. The loaded bytes are recorded as an L event in the trace.
 2. The shadow is updated with the new value (so subsequent loads of the same address don't re-trigger).
 
