@@ -21,14 +21,15 @@ Reimplementing Wizard Engine's R3 replay-recording monitor using whamm bytecode 
 | TC (Table Call) | Blocked | Needs whamm#299 |
 | TG (Table Grow) | Blocked | Needs whamm#299 |
 
-## Blocked on whamm feature requests
+## whamm feature request status
 
-- **[whamm#299](https://github.com/ejrgilbert/whamm/issues/299)** — `argN`/`resN` for `table.get` and `table.set` (requires GC type support in whamm). Unblocks T/TC/TG events. Implementation plan: shadow table (`Vec<Vec<i32>>`) with `shadow_table_set` on `table.set:before`, `check_table_get` on `table.get:after`. 4 tests currently silently pass because grep filter excludes `T;` — add T to filters once implemented.
-- **[whamm#301](https://github.com/ejrgilbert/whamm/issues/301)** — resolved fid from `call_indirect` (also requires GC types). Would let us replace the 3-phase `tracking_indirect` / `func:entry` / `call_indirect:after` flag pattern with a direct predicate.
-
-## Resolved whamm feature requests
-
-- **[whamm#300](https://github.com/ejrgilbert/whamm/issues/300)** — `mem_size(memid)` and `page_size(memid)` bound functions. Now available in whamm master. Used for MG detection at EC/IR boundaries.
+- **[whamm#299](https://github.com/ejrgilbert/whamm/issues/299)** — `argN`/`resN` for `table.get` and `table.set` (requires GC type support in whamm). Would unblock T/TC/TG events. **Deprioritized** per Ben Titzer (co-founder of wasm): table mutation events can't really be done via bytecode rewriting and are exceedingly rare in practice (only 5 occurrences across 4 files in our 117-test suite).
+- **[whamm#300](https://github.com/ejrgilbert/whamm/issues/300)** — `mem_size(memid)` and `page_size(memid)` bound functions. **Resolved**, used for MG detection at EC/IR boundaries.
+- **[whamm#301](https://github.com/ejrgilbert/whamm/issues/301)** — resolved fid from `call_indirect`. **Landed but unusable for us.** Tried switching from the 3-phase flag pattern to `if (resolved_fid == ...)` in `call_indirect:before`. Two problems:
+  1. **Init-time only**: `resolved_fid` resolves the funcref using a static shadow table populated from the element segment. Any runtime `table.set` (or host table modification) makes the resolution stale, missing IC events.
+  2. **Recursive call_indirect traps with `TABLE_OOB`**: When a probe references `resolved_fid` and the wasm code does recursive `call_indirect` (a function indirectly calls itself), the instrumented module traps inside whamm's shadow-table machinery. Reproduced minimally with a 1-entry static table and a self-recursive function. Standalone repro at `~/Downloads/claude-play-space/whamm_repro_resolved_fid_trap/`. Worth filing as a whamm bug.
+  
+  We kept the 3-phase pattern (`tracking_indirect` → `func:entry` → `call_indirect:after`) because `func:entry` sees the actual function being entered at runtime, regardless of how the table was populated.
 
 ## Key non-obvious decisions
 
