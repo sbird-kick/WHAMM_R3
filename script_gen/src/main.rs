@@ -39,6 +39,8 @@ struct WasmInfo {
     exports: Vec<(String, u32)>,
     exported_globals: Vec<u32>,
     globals: Vec<GlobalInfo>,
+    passive_segments: Vec<(u32, Vec<u8>)>,        // (segidx, bytes)
+    active_nonzero_segments: Vec<(u32, u64, Vec<u8>)>, // (memidx, offset, bytes) for memidx != 0
 }
 
 impl WasmInfo {
@@ -58,9 +60,27 @@ fn parse_wasm(bytes: &[u8]) -> WasmInfo {
         func_names: HashMap::new(), types: Vec::new(), num_imports: 0, num_imported_globals: 0,
         import_type_indices: Vec::new(), local_type_indices: Vec::new(),
         exports: Vec::new(), exported_globals: Vec::new(), globals: Vec::new(),
+        passive_segments: Vec::new(), active_nonzero_segments: Vec::new(),
     };
+    let mut seg_idx: u32 = 0;
     for payload in Parser::new(0).parse_all(bytes) {
         match payload {
+            Ok(Payload::DataSection(r)) => for d in r {
+                let d = d.expect("data segment");
+                match d.kind {
+                    wasmparser::DataKind::Passive => w.passive_segments.push((seg_idx, d.data.to_vec())),
+                    wasmparser::DataKind::Active { memory_index, offset_expr } => {
+                        if memory_index != 0 {
+                            // Shadow for memory != 0 isn't seeded by whamm's active_data_*
+                            // bound fns (they cover memory 0); register bytes explicitly.
+                            if let Ok(wasmparser::Operator::I32Const { value }) = offset_expr.get_operators_reader().read() {
+                                w.active_nonzero_segments.push((memory_index, value as u32 as u64, d.data.to_vec()));
+                            }
+                        }
+                    }
+                }
+                seg_idx += 1;
+            },
             Ok(Payload::TypeSection(r)) => for rg in r {
                 for st in rg.expect("type").into_types() {
                     match &st.composite_type.inner {
@@ -192,6 +212,17 @@ fn emit_script(info: &WasmInfo, excluded: &[u32]) {
     println!("\nwasm:report {{\n    r3_mem.print_trace();\n}}");
 }
 
+/// Bytes → little-endian i64 chunks: (offset, chunk_value, chunk_len).
+fn i64_chunks(bytes: &[u8]) -> Vec<(usize, i64, usize)> {
+    bytes.chunks(8).enumerate().map(|(i, c)| {
+        let mut v: i64 = 0;
+        for (j, b) in c.iter().enumerate() { v |= (*b as i64) << (j * 8); }
+        (i * 8, v, c.len())
+    }).collect()
+}
+
+const MAX_REGISTERED_SEGMENT_BYTES: usize = 65536;
+
 fn emit_preamble(info: &WasmInfo) {
     // Shadow memory init
     println!("var data_len: u32 = active_data_len(APP_MEMID);");
@@ -199,6 +230,26 @@ fn emit_preamble(info: &WasmInfo) {
     println!("var ptr: i32 = r3_mem.mem_alloc(data_len as i32);");
     println!("memcpy(APP_MEMID, data_start, memid(r3_mem), ptr as u32, data_len);");
     println!("@init r3_mem.init_shadow(ptr, data_start as i32, data_len as i32);");
+
+    // Passive data segments: register bytes so memory.init can update the shadow.
+    let total: usize = info.passive_segments.iter().map(|(_, b)| b.len()).sum();
+    if total > MAX_REGISTERED_SEGMENT_BYTES {
+        eprintln!("warning: {total} bytes of passive data segments exceed the {MAX_REGISTERED_SEGMENT_BYTES}-byte \
+                   registration cap — skipping; memory.init tracking will be incomplete (false L events possible)");
+    } else {
+        for (segidx, bytes) in &info.passive_segments {
+            for (off, chunk, len) in i64_chunks(bytes) {
+                println!("@init r3_mem.passive_chunk({segidx} as i32, {off} as i32, {chunk} as i64, {len} as i32);");
+            }
+        }
+    }
+
+    // Active data segments for memory != 0: seed those shadows directly.
+    for (memidx, offset, bytes) in &info.active_nonzero_segments {
+        for (off, chunk, len) in i64_chunks(bytes) {
+            println!("@init r3_mem.shadow_store({memidx} as i32, {} as i32, {len} as i32, {chunk} as i64);", *offset as usize + off);
+        }
+    }
 
     // Shadow global init (exported mutable globals with non-zero init)
     for g in info.globals.iter().filter(|g| g.mutable_ && info.exported_globals.contains(&g.idx)) {
@@ -260,7 +311,7 @@ fn emit_entry_probes(info: &WasmInfo, excluded: &[u32]) {
         println!("wasm{}:opcode:*:before / opidx == 0 && ({}) / {{", ty_bounds("local", &params), eq_pred("fid", &fids));
         println!("    if (call_depth == 0) {{");
         emit_event(0, "fid as i32", "local", &params, "        ");
-        println!("        r3_mem.check_mem_grow(mem_size(APP_MEMID) as i32);");
+        println!("        r3_mem.check_mem_grow(0, mem_size(APP_MEMID) as i32);");
         println!("    }}");
         println!("    call_depth = call_depth + 1;\n}}");
     }
@@ -288,7 +339,7 @@ fn emit_direct_call_probes(info: &WasmInfo, excluded: &[u32], npred: &str) {
     for (results, fids) in group_by_results(info, excluded) {
         println!("wasm:opcode:call{}:after / ({}) && {npred} / {{", ty_bounds("res", &results), eq_pred("imm0", &fids));
         emit_event(1, "imm0 as i32", "res", &results, "    ");
-        println!("    r3_mem.check_mem_grow(mem_size(APP_MEMID) as i32);");
+        println!("    r3_mem.check_mem_grow(0, mem_size(APP_MEMID) as i32);");
         println!("    call_depth = call_depth + 1;\n}}\n");
     }
 }
@@ -323,14 +374,14 @@ fn emit_indirect_call_probes(info: &WasmInfo, excluded: &[u32], npred: &str) {
         println!("wasm:opcode:call_indirect{}:after {{", ty_bounds("res", results));
         println!("    if (indirect_target_fid != -1) {{");
         emit_event(1, "indirect_target_fid", "res", results, "        ");
-        println!("        r3_mem.check_mem_grow(mem_size(APP_MEMID) as i32);");
+        println!("        r3_mem.check_mem_grow(0, mem_size(APP_MEMID) as i32);");
         println!("        call_depth = call_depth + 1;\n        indirect_target_fid = -1;\n    }}\n}}");
     }
     if !void.is_empty() {
         println!("wasm:opcode:call_indirect:after {{");
         println!("    if (indirect_target_fid != -1) {{");
         emit_event(1, "indirect_target_fid", "res", &[], "        ");
-        println!("        r3_mem.check_mem_grow(mem_size(APP_MEMID) as i32);");
+        println!("        r3_mem.check_mem_grow(0, mem_size(APP_MEMID) as i32);");
         println!("        call_depth = call_depth + 1;\n        indirect_target_fid = -1;\n    }}\n}}");
     }
 }
@@ -361,24 +412,28 @@ fn emit_global_probes(info: &WasmInfo, excluded: &[u32]) {
 fn emit_shadow_probes(epred: &str) {
     // memory.grow in non-excluded code: update shadow memory + shadow page count
     // (excluded code grows are detected at EC/IR boundaries via check_mem_grow)
-    println!("\nwasm:opcode:memory.grow:after{epred} {{\n    r3_mem.shadow_grow(res0, arg0 as i32);\n}}");
-    println!("wasm:opcode:memory.fill:before{epred} {{\n    r3_mem.shadow_fill(arg2 as i32, arg1 as i32, arg0 as i32);\n}}");
-    println!("wasm:opcode:memory.copy:before{epred} {{\n    r3_mem.shadow_copy(arg2 as i32, arg1 as i32, arg0 as i32);\n}}");
+    println!("\nwasm:opcode:memory.grow:after{epred} {{\n    r3_mem.shadow_grow(imm0 as i32, res0, arg0 as i32);\n}}");
+    println!("wasm:opcode:memory.fill:before{epred} {{\n    r3_mem.shadow_fill(imm0 as i32, arg2 as i32, arg1 as i32, arg0 as i32);\n}}");
+    // Same-memory copies only: whamm exposes a single memidx immediate on memory.copy.
+    println!("wasm:opcode:memory.copy:before{epred} {{\n    r3_mem.shadow_copy(imm0 as i32, arg2 as i32, arg1 as i32, arg0 as i32);\n}}");
+    // memory.init from a passive segment (registered at @init): imm0 = segidx, imm1 = memidx;
+    // stack args top-first: arg0 = len, arg1 = src offset, arg2 = dest.
+    println!("wasm:opcode:memory.init:before{epred} {{\n    r3_mem.shadow_init(imm1 as i32, imm0 as i32, arg2 as i32, arg1 as i32, arg0 as i32);\n}}");
 
     println!("\nwasm:opcode:i32.store|i32.store8|i32.store16:before{epred} {{");
-    println!("    r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);\n}}");
+    println!("    r3_mem.shadow_store(memory as i32, effective_addr as i32, data_size as i32, arg0 as i64);\n}}");
     println!("wasm:opcode:i64.store|i64.store8|i64.store16|i64.store32:before{epred} {{");
-    println!("    r3_mem.shadow_store(effective_addr as i32, data_size as i32, arg0 as i64);\n}}");
+    println!("    r3_mem.shadow_store(memory as i32, effective_addr as i32, data_size as i32, arg0 as i64);\n}}");
     println!("wasm:opcode:f32.store:before{epred} {{");
-    println!("    r3_mem.shadow_store_f32(effective_addr as i32, arg0);\n}}");
+    println!("    r3_mem.shadow_store_f32(memory as i32, effective_addr as i32, arg0);\n}}");
     println!("wasm:opcode:f64.store:before{epred} {{");
-    println!("    r3_mem.shadow_store_f64(effective_addr as i32, arg0);\n}}");
+    println!("    r3_mem.shadow_store_f64(memory as i32, effective_addr as i32, arg0);\n}}");
     println!("wasm:opcode:i32.load|i32.load8_s|i32.load8_u|i32.load16_s|i32.load16_u:after{epred} {{");
-    println!("    r3_mem.check_load(effective_addr as i32, data_size as i32, res0 as i64);\n}}");
+    println!("    r3_mem.check_load(memory as i32, effective_addr as i32, data_size as i32, res0 as i64);\n}}");
     println!("wasm:opcode:i64.load|i64.load8_s|i64.load8_u|i64.load16_s|i64.load16_u|i64.load32_s|i64.load32_u:after{epred} {{");
-    println!("    r3_mem.check_load(effective_addr as i32, data_size as i32, res0 as i64);\n}}");
+    println!("    r3_mem.check_load(memory as i32, effective_addr as i32, data_size as i32, res0 as i64);\n}}");
     println!("wasm:opcode:f32.load:after{epred} {{");
-    println!("    r3_mem.check_load_f32(effective_addr as i32, res0);\n}}");
+    println!("    r3_mem.check_load_f32(memory as i32, effective_addr as i32, res0);\n}}");
     println!("wasm:opcode:f64.load:after{epred} {{");
-    println!("    r3_mem.check_load_f64(effective_addr as i32, res0);\n}}");
+    println!("    r3_mem.check_load_f64(memory as i32, effective_addr as i32, res0);\n}}");
 }

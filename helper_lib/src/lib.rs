@@ -10,7 +10,7 @@ enum ParamValue { I32(i32), I64(i64), F32(f32), F64(f64) }
 
 // event_type: 0 = EC, 1 = IR
 enum TraceEvent {
-    Load { addr: u32, bytes: Vec<u8> },
+    Load { mem: u32, addr: u32, bytes: Vec<u8> },
     ExternalCall { fid: u32, params: Vec<ParamValue> },
     ImportCall { fid: u32 },
     ImportReturn { fid: u32, results: Vec<ParamValue> },
@@ -24,18 +24,24 @@ struct EventBuilder { event_type: i32, fid: u32, params: Vec<ParamValue> }
 // ── State ────────────────────────────────────────────────────────────────
 
 struct State {
-    shadow: Vec<u8>,
+    shadows: Vec<Vec<u8>>,          // one shadow per memory, indexed by memidx
     shadow_globals: Vec<i64>,
     trace: Vec<TraceEvent>,
     building: Option<EventBuilder>,
     names: HashMap<u32, String>,
-    shadow_pages: u32,  // tracked page count for MG detection
+    shadow_pages: Vec<u32>,         // per-memory page count for MG detection
+    passive: HashMap<u32, Vec<u8>>, // passive data segments, registered at @init
 }
 
 static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
-    shadow: Vec::new(), shadow_globals: Vec::new(), trace: Vec::new(),
-    building: None, names: HashMap::new(), shadow_pages: 0,
+    shadows: Vec::new(), shadow_globals: Vec::new(), trace: Vec::new(),
+    building: None, names: HashMap::new(), shadow_pages: Vec::new(), passive: HashMap::new(),
 }));
+
+fn shadow_of(s: &mut State, mem: u32) -> &mut Vec<u8> {
+    if mem as usize >= s.shadows.len() { s.shadows.resize(mem as usize + 1, Vec::new()); }
+    &mut s.shadows[mem as usize]
+}
 
 fn mask(size: u32) -> i64 {
     if size >= 8 { -1i64 } else { (1i64 << (size * 8)) - 1 }
@@ -65,93 +71,135 @@ pub fn mem_alloc(len: i32) -> i32 {
 pub fn init_shadow(data_ptr: i32, start: i32, len: i32) -> i32 {
     let mut s = STATE.lock().unwrap();
     let (start, len) = (start as u32, len as u32);
+    let sh = shadow_of(&mut s, 0);
     let end = (start + len) as usize;
-    if end > s.shadow.len() { s.shadow.resize(end, 0); }
+    if end > sh.len() { sh.resize(end, 0); }
     for i in 0..len {
-        s.shadow[(start + i) as usize] = unsafe { *((data_ptr as usize + i as usize) as *const u8) };
+        sh[(start + i) as usize] = unsafe { *((data_ptr as usize + i as usize) as *const u8) };
     }
     0
 }
 
-#[no_mangle]
-pub fn shadow_store(addr: i32, size: i32, value: i64) {
-    let mut s = STATE.lock().unwrap();
-    let (addr, size) = (addr as u32, size as u32);
+fn write_shadow(sh: &mut Vec<u8>, addr: u32, size: u32, value: i64) {
     let end = (addr + size) as usize;
-    if end > s.shadow.len() { s.shadow.resize(end, 0); }
-    for i in 0..size { s.shadow[(addr + i) as usize] = ((value >> (i * 8)) & 0xFF) as u8; }
+    if end > sh.len() { sh.resize(end, 0); }
+    for i in 0..size { sh[(addr + i) as usize] = ((value >> (i * 8)) & 0xFF) as u8; }
 }
 
 #[no_mangle]
-pub fn check_load(addr: i32, size: i32, value: i64) {
-    let (addr, size) = (addr as u32, size as u32);
+pub fn shadow_store(mem: i32, addr: i32, size: i32, value: i64) {
+    let mut s = STATE.lock().unwrap();
+    write_shadow(shadow_of(&mut s, mem as u32), addr as u32, size as u32, value);
+}
+
+#[no_mangle]
+pub fn check_load(mem: i32, addr: i32, size: i32, value: i64) {
+    let (mem, addr, size) = (mem as u32, addr as u32, size as u32);
     let mut s = STATE.lock().unwrap();
     let m = mask(size);
+    let sh = shadow_of(&mut s, mem);
     let mut shadow: i64 = 0;
     for i in 0..size {
         let idx = (addr + i) as usize;
-        let b = if idx < s.shadow.len() { s.shadow[idx] } else { 0 };
+        let b = if idx < sh.len() { sh[idx] } else { 0 };
         shadow |= (b as i64) << (i * 8);
     }
     if (value & m) != (shadow & m) {
         let bytes: Vec<u8> = (0..size).map(|i| ((value >> (i * 8)) & 0xFF) as u8).collect();
-        s.trace.push(TraceEvent::Load { addr, bytes });
-        let end = (addr + size) as usize;
-        if end > s.shadow.len() { s.shadow.resize(end, 0); }
-        for i in 0..size { s.shadow[(addr + i) as usize] = ((value >> (i * 8)) & 0xFF) as u8; }
+        write_shadow(sh, addr, size, value);
+        s.trace.push(TraceEvent::Load { mem, addr, bytes });
     }
 }
 
 // ── Float store/load (bit-reinterpretation, not numeric conversion) ─────
 
 #[no_mangle]
-pub fn shadow_store_f32(addr: i32, val: f32) {
-    shadow_store(addr, 4, val.to_bits() as i64);
+pub fn shadow_store_f32(mem: i32, addr: i32, val: f32) {
+    shadow_store(mem, addr, 4, val.to_bits() as i64);
 }
 
 #[no_mangle]
-pub fn shadow_store_f64(addr: i32, val: f64) {
-    shadow_store(addr, 8, val.to_bits() as i64);
+pub fn shadow_store_f64(mem: i32, addr: i32, val: f64) {
+    shadow_store(mem, addr, 8, val.to_bits() as i64);
 }
 
 #[no_mangle]
-pub fn check_load_f32(addr: i32, val: f32) {
-    check_load(addr, 4, val.to_bits() as i64);
+pub fn check_load_f32(mem: i32, addr: i32, val: f32) {
+    check_load(mem, addr, 4, val.to_bits() as i64);
 }
 
 #[no_mangle]
-pub fn check_load_f64(addr: i32, val: f64) {
-    check_load(addr, 8, val.to_bits() as i64);
+pub fn check_load_f64(mem: i32, addr: i32, val: f64) {
+    check_load(mem, addr, 8, val.to_bits() as i64);
 }
 
 // ── Bulk memory shadow updates ──────────────────────────────────────────
 
 #[no_mangle]
-pub fn shadow_grow(old_pages: i32, new_pages: i32) {
+pub fn shadow_grow(mem: i32, old_pages: i32, new_pages: i32) {
     if old_pages < 0 { return; }
     let mut s = STATE.lock().unwrap();
     let total = (old_pages + new_pages) as u32;
     let new_size = total as usize * 65536;
-    if new_size > s.shadow.len() { s.shadow.resize(new_size, 0); }
+    let sh = shadow_of(&mut s, mem as u32);
+    if new_size > sh.len() { sh.resize(new_size, 0); }
     // Update shadow_pages so check_mem_grow won't false-trigger for wasm-internal grows
-    if total > s.shadow_pages { s.shadow_pages = total; }
+    let mi = mem as usize;
+    if mi >= s.shadow_pages.len() { s.shadow_pages.resize(mi + 1, 0); }
+    if total > s.shadow_pages[mi] { s.shadow_pages[mi] = total; }
 }
 
 #[no_mangle]
-pub fn shadow_fill(dest: i32, val: i32, len: i32) {
+pub fn shadow_fill(mem: i32, dest: i32, val: i32, len: i32) {
     let mut s = STATE.lock().unwrap();
+    let sh = shadow_of(&mut s, mem as u32);
     let end = dest as usize + len as usize;
-    if end > s.shadow.len() { s.shadow.resize(end, 0); }
-    s.shadow[dest as usize..end].fill(val as u8);
+    if end > sh.len() { sh.resize(end, 0); }
+    sh[dest as usize..end].fill(val as u8);
 }
 
+// Same-memory copy only: whamm exposes just one memidx immediate (imm0) on
+// memory.copy, so cross-memory copies can't be routed (documented limitation).
 #[no_mangle]
-pub fn shadow_copy(dest: i32, src: i32, len: i32) {
+pub fn shadow_copy(mem: i32, dest: i32, src: i32, len: i32) {
     let mut s = STATE.lock().unwrap();
+    let sh = shadow_of(&mut s, mem as u32);
     let (d, sr, n) = (dest as usize, src as usize, len as usize);
     let end = d.max(sr) + n;
-    if end > s.shadow.len() { s.shadow.resize(end, 0); }
-    s.shadow.copy_within(sr..sr + n, d);
+    if end > sh.len() { sh.resize(end, 0); }
+    sh.copy_within(sr..sr + n, d);
+}
+
+// ── Passive data segments (for memory.init shadow tracking) ─────────────
+
+/// Register 8 bytes of a passive data segment at @init time.
+#[no_mangle]
+pub fn passive_chunk(segidx: i32, offset: i32, chunk: i64, chunk_len: i32) {
+    let mut s = STATE.lock().unwrap();
+    let seg = s.passive.entry(segidx as u32).or_default();
+    let end = offset as usize + chunk_len as usize;
+    if end > seg.len() { seg.resize(end, 0); }
+    for i in 0..chunk_len as usize {
+        seg[offset as usize + i] = ((chunk >> (i * 8)) & 0xFF) as u8;
+    }
+}
+
+/// memory.init executed by non-excluded code: apply segment bytes to the shadow.
+#[no_mangle]
+pub fn shadow_init(mem: i32, segidx: i32, dest: i32, src_off: i32, len: i32) {
+    let mut s = STATE.lock().unwrap();
+    let bytes: Vec<u8> = match s.passive.get(&(segidx as u32)) {
+        Some(seg) => {
+            let (o, n) = (src_off as usize, len as usize);
+            if o + n > seg.len() { return; } // module would trap; shadow state moot
+            seg[o..o + n].to_vec()
+        }
+        None => return,
+    };
+    let sh = shadow_of(&mut s, mem as u32);
+    let end = dest as usize + bytes.len();
+    if end > sh.len() { sh.resize(end, 0); }
+    sh[dest as usize..end].copy_from_slice(&bytes);
 }
 
 // ── Shadow globals ──────────────────────────────────────────────────────
@@ -268,16 +316,17 @@ pub fn record_ig_f64(idx: i32, val: f64) {
 }
 
 #[no_mangle]
-pub fn check_mem_grow(current_pages: i32) {
+pub fn check_mem_grow(mem: i32, current_pages: i32) {
     let mut s = STATE.lock().unwrap();
-    let current = current_pages as u32;
-    if s.shadow_pages == 0 {
+    let (mi, current) = (mem as usize, current_pages as u32);
+    if mi >= s.shadow_pages.len() { s.shadow_pages.resize(mi + 1, 0); }
+    if s.shadow_pages[mi] == 0 {
         // First call: initialize without emitting MG
-        s.shadow_pages = current;
-    } else if current > s.shadow_pages {
-        let growth = current - s.shadow_pages;
-        s.trace.push(TraceEvent::MemGrow { mem_idx: 0, pages: growth });
-        s.shadow_pages = current;
+        s.shadow_pages[mi] = current;
+    } else if current > s.shadow_pages[mi] {
+        let growth = current - s.shadow_pages[mi];
+        s.trace.push(TraceEvent::MemGrow { mem_idx: mem as u32, pages: growth });
+        s.shadow_pages[mi] = current;
     }
 }
 
@@ -299,9 +348,9 @@ pub fn print_trace() {
     for ev in &s.trace {
         match ev {
             TraceEvent::ImportGlobal { .. } => {}
-            TraceEvent::Load { addr, bytes } => {
+            TraceEvent::Load { mem, addr, bytes } => {
                 let v: Vec<String> = bytes.iter().map(|b| b.to_string()).collect();
-                println!("L;0;{};{}", addr, v.join(","));
+                println!("L;{};{};{}", mem, addr, v.join(","));
             }
             TraceEvent::ExternalCall { fid, params } => {
                 let name = s.names.get(fid).map(|s| s.as_str()).unwrap_or("fid");
