@@ -578,6 +578,8 @@ The IG test cases:
 
 **4/4** float-memory tests pass: `float-load-only` (host writes float, wasm reads via f32.load/f64.load), `float-store-shadow` (wasm writes via f32.store, reads via i32.load — verifies no false L events), `float-mixed` (wasm writes f32, host overwrites, wasm reads via f32.load), `float-no-change` (repeated f32.load doesn't duplicate L events).
 
+**188/188** generated tests pass (`gen_tests/`, committed .wat+.wasm): 2 hand-written gap probes plus 186 machine-generated tests across 8 categories (loads/stores, floats, globals, direct calls, indirect calls, bulk memory, memory.grow, multi-memory). 13 additional generated tests are quarantined in `gen_tests_oracle_blocked/` (Wizard's oracle crashes on them) and 1 in `gen_tests_whamm_blocked/` (blocked on a whamm bug); they are correct tests but can't run until upstream fixes land.
+
 **5/5** IG (multi-module) tests pass, covering i32/i64/f64 imported globals, zero-init, combined IG+EC+IC+IR events, and mutable imported globals with G events.
 
 **9/9** C/C++ tests pass (2 skipped — `complex` and `fibonacci` crash Wizard's oracle), including programs with:
@@ -592,7 +594,7 @@ The IG test cases:
 
 Two C/C++ tests are excluded because Wizard's own R3 monitor crashes on them (`ArrayIndexOutOfBoundsException` in `onMemoryCopy`): `fibonacci` and `complex`. Our implementation handles them correctly but they can't be oracle-verified.
 
-**Total: 117/117** tests pass across all suites via `./run_tests.sh`.
+**Total: 305/305** tests pass across all suites via `./run_tests.sh` (verified 2026-07-23 on whamm v1.0.0 `c461d20`, wizard-engine `2ccc7300`).
 
 ## Known Limitations
 
