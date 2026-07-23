@@ -1,0 +1,10 @@
+;; Real writes to m1, then host reads (no L on host actions, only real code)
+(module
+  (memory $m0 (export "mem0") 1)
+  (memory $m1 (export "mem1") 1)
+  (func $r3_main (export "_start")
+    call $work)
+  (func $work (export "work")
+    i32.const 0 i32.const 0xABCDEF00 i32.store $m1)
+  (func $r3_read (export "r3_read")
+    i32.const 0 i32.load $m1 drop))

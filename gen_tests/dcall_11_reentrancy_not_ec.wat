@@ -1,0 +1,10 @@
+;; Reentrancy: r3_main→$a→$b, where $b's entry is NOT an EC (depth > 0)
+;; Expected events: EC for $a only, not for $b (since $b called at depth 1)
+(module
+  (memory (export "mem") 1)
+  (func $r3_main (export "_start")
+    call $a)
+  (func $a (export "a")
+    call $b)
+  (func $b (export "b")
+    nop))

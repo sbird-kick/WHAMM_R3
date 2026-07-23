@@ -51,8 +51,8 @@ fn fmt_param(p: &ParamValue) -> String {
     match p {
         ParamValue::I32(v) => format!("{}", v),
         ParamValue::I64(v) => format!("{}", v),
-        ParamValue::F32(v) => format!("0x{:x}", v.to_bits()),
-        ParamValue::F64(v) => format!("0x{:x}", v.to_bits()),
+        ParamValue::F32(v) => format!("0x{:X}", v.to_bits()),
+        ParamValue::F64(v) => format!("0x{:X}", v.to_bits()),
     }
 }
 

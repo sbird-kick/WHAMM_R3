@@ -1,0 +1,7 @@
+ORACLE-CRASH: memory.copy operation causes ArrayIndexOutOfBoundsException in oracle
+
+Test: bulk_19_copy_fill
+Status: Compliant WAT, no prohibitions violated
+Issue: Oracle crashes on memory.copy operations (known limitation)
+
+The test validates memory.copy functionality which is required by the bulk memory category but triggers a bug in the oracle's shadow memory tracking.

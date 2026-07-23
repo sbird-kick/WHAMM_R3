@@ -251,7 +251,7 @@ fn emit_preamble(info: &WasmInfo) {
         }
     }
 
-    // Shadow global init (exported mutable globals with non-zero init)
+    // Shadow global init (tracked mutable globals with non-zero init)
     for g in info.globals.iter().filter(|g| g.mutable_ && info.exported_globals.contains(&g.idx)) {
         if let Some(val) = g.init_i64 {
             if val != 0 { println!("r3_mem.shadow_global_set({} as i32, {} as i64);", g.idx, val); }
@@ -387,7 +387,11 @@ fn emit_indirect_call_probes(info: &WasmInfo, excluded: &[u32], npred: &str) {
 }
 
 fn emit_global_probes(info: &WasmInfo, excluded: &[u32]) {
-    // Track exported mutable globals AND imported mutable globals
+    // Track exported + imported mutable globals. The oracle tracks ALL mutable
+    // globals (gen_tests_whamm_blocked/glob_12), but widening this hits a whamm
+    // v1.0.0 bug: with global probes for two value types on one event, one type
+    // group's set-probe silently stops firing (repro: whamm_repro_typed_probe_interference).
+    // Widen back to `g.mutable_` once that's fixed upstream.
     let mut_globals: Vec<&GlobalInfo> = info.globals.iter()
         .filter(|g| g.mutable_ && (info.exported_globals.contains(&g.idx) || g.idx < info.num_imported_globals))
         .collect();
