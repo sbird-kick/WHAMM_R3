@@ -150,14 +150,18 @@ fn ty_bounds(prefix: &str, types: &[ValType]) -> String {
     else { format!("({})", types.iter().enumerate().map(|(i, t)| format!("{prefix}{i}: {}", vt(t))).collect::<Vec<_>>().join(", ")) }
 }
 
-/// Group fids by return type signature.
-fn group_by_results(info: &WasmInfo, fids: &[u32]) -> Vec<(Vec<ValType>, Vec<u32>)> {
+/// Group fids by a component of their type signature (params or results).
+fn group_by_sig(info: &WasmInfo, fids: &[u32], sel: fn(&(Vec<ValType>, Vec<ValType>)) -> &Vec<ValType>) -> Vec<(Vec<ValType>, Vec<u32>)> {
     let mut groups: HashMap<Vec<ValType>, Vec<u32>> = HashMap::new();
-    for &fid in fids { groups.entry(info.func_type(fid).1.clone()).or_default().push(fid); }
+    for &fid in fids { groups.entry(sel(info.func_type(fid)).clone()).or_default().push(fid); }
     let mut sorted: Vec<_> = groups.into_iter().collect();
     sorted.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.1.cmp(&b.1)));
     for (_, fids) in &mut sorted { fids.sort(); }
     sorted
+}
+
+fn group_by_results(info: &WasmInfo, fids: &[u32]) -> Vec<(Vec<ValType>, Vec<u32>)> {
+    group_by_sig(info, fids, |t| &t.1)
 }
 
 // ── Event body emission ──────────────────────────────────────────────────
@@ -249,14 +253,14 @@ fn emit_entry_probes(info: &WasmInfo, excluded: &[u32]) {
         .map(|(_, fid)| *fid).filter(|fid| !info.is_import(*fid) && !excluded.contains(fid))
         .collect::<BTreeSet<_>>().into_iter().collect();
 
-    // Exported: EC check + call_depth
-    for &fid in &export_fids {
-        let (params, _) = info.func_type(fid);
-        println!("wasm{}:opcode:*:before / opidx == 0 && fid == {fid} / {{", ty_bounds("local", params));
+    // Exported: EC check + call_depth, grouped by param signature.
+    // (Historically one probe per function — whamm <1.0 didn't respect script order
+    // with >2 probes on one event. Retested grouped on v1.0.0: order is respected.)
+    for (params, fids) in group_by_sig(info, &export_fids, |t| &t.0) {
+        println!("wasm{}:opcode:*:before / opidx == 0 && ({}) / {{", ty_bounds("local", &params), eq_pred("fid", &fids));
         println!("    if (call_depth == 0) {{");
-        emit_event(0, "fid as i32", "local", params, "        ");
-        println!("        var _cp: u32 = mem_size(APP_MEMID);");
-        println!("        r3_mem.check_mem_grow(_cp as i32);");
+        emit_event(0, "fid as i32", "local", &params, "        ");
+        println!("        r3_mem.check_mem_grow(mem_size(APP_MEMID) as i32);");
         println!("    }}");
         println!("    call_depth = call_depth + 1;\n}}");
     }
@@ -284,8 +288,7 @@ fn emit_direct_call_probes(info: &WasmInfo, excluded: &[u32], npred: &str) {
     for (results, fids) in group_by_results(info, excluded) {
         println!("wasm:opcode:call{}:after / ({}) && {npred} / {{", ty_bounds("res", &results), eq_pred("imm0", &fids));
         emit_event(1, "imm0 as i32", "res", &results, "    ");
-        println!("        var _cp: u32 = mem_size(APP_MEMID);");
-        println!("        r3_mem.check_mem_grow(_cp as i32);");
+        println!("    r3_mem.check_mem_grow(mem_size(APP_MEMID) as i32);");
         println!("    call_depth = call_depth + 1;\n}}\n");
     }
 }
@@ -320,16 +323,14 @@ fn emit_indirect_call_probes(info: &WasmInfo, excluded: &[u32], npred: &str) {
         println!("wasm:opcode:call_indirect{}:after {{", ty_bounds("res", results));
         println!("    if (indirect_target_fid != -1) {{");
         emit_event(1, "indirect_target_fid", "res", results, "        ");
-        println!("        var _cp: u32 = mem_size(APP_MEMID);");
-        println!("        r3_mem.check_mem_grow(_cp as i32);");
+        println!("        r3_mem.check_mem_grow(mem_size(APP_MEMID) as i32);");
         println!("        call_depth = call_depth + 1;\n        indirect_target_fid = -1;\n    }}\n}}");
     }
     if !void.is_empty() {
         println!("wasm:opcode:call_indirect:after {{");
         println!("    if (indirect_target_fid != -1) {{");
         emit_event(1, "indirect_target_fid", "res", &[], "        ");
-        println!("        var _cp: u32 = mem_size(APP_MEMID);");
-        println!("        r3_mem.check_mem_grow(_cp as i32);");
+        println!("        r3_mem.check_mem_grow(mem_size(APP_MEMID) as i32);");
         println!("        call_depth = call_depth + 1;\n        indirect_target_fid = -1;\n    }}\n}}");
     }
 }

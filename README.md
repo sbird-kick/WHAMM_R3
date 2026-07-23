@@ -80,7 +80,7 @@ From this information, script_gen generates a `.mm` whamm script with:
 - Shadow global initialization from init expressions
 - Export name registration (using whamm's `write_str` to pass strings to the helper lib)
 - IG probes for imported globals (one-shot `global.get:after` per imported global)
-- Per-function entry probes for EC detection with correct `localN` type bounds
+- Entry probes for EC detection, grouped by param signature, with correct `localN` type bounds
 - `call_depth` tracking probes
 - IC probes for direct calls (`call:before`)
 - IR probes for direct calls (`call:after`) grouped by return type
@@ -346,8 +346,7 @@ MG events record when the host (excluded code or the actual host API) grows wasm
 
 ```mm
 // At EC entry and after every IR:
-var _cp: u32 = mem_size(APP_MEMID);
-r3_mem.check_mem_grow(_cp as i32);
+r3_mem.check_mem_grow(mem_size(APP_MEMID) as i32);
 ```
 
 `mem_size(APP_MEMID)` is a whamm bound function that emits a `memory.size` instruction, returning the current page count. `check_mem_grow` in r3_mem compares this against `shadow_pages`:
@@ -373,9 +372,9 @@ This boundary-based approach detects memory growth regardless of whether it came
 
 Both fire at the start of a function body. We use the opcode probe because whamm guarantees **script order** for probes in the same event category. Our EC probe and IC probe both need to fire at the same bytecode position (when the first instruction is a `call` to an excluded function). With `func:entry` for EC and `call:before` for IC, they're in different categories and whamm's insertion order puts IC first — wrong. With both as `opcode:*:before`, script order applies and EC fires first.
 
-### Why per-function probes instead of grouped-by-signature
+### EC probes are grouped by param signature (history: were per-function)
 
-Originally we grouped all exports with the same parameter signature into one probe (`/ fid == 1 || fid == 5 || fid == 12 /`). This created multiple `opcode:*:before / opidx == 0 /` probes when different signatures existed. whamm had a bug where >2 probes on the same event didn't respect script order, causing the call_depth increment to fire before EC. Per-function probes (one `opcode:*:before / opidx == 0 && fid == N /` per function) eliminate probe competition at the same location.
+Exports with the same parameter signature share one probe (`/ opidx == 0 && (fid == 1 || fid == 5) /`). whamm <1.0 had a bug where >2 probes on the same event didn't respect script order, which forced one-probe-per-function as a workaround; retested on v1.0.0 (2026-07-23), grouped probes respect script order and the full suite passes. If EC/IC ordering ever regresses, suspect this first.
 
 ### Why `argN` is reversed from what you'd expect
 
@@ -632,6 +631,6 @@ This project served as a stress test for whamm. We discovered and reported sever
 
 5. **`func:entry` vs `call:before` insertion ordering**: When both targeted the same bytecode position (function's first instruction is a call), `call:before` was inserted before `func:entry`, causing IC to fire before EC. Workaround: use `opcode:*:before / opidx == 0 /` for EC instead, keeping both in the opcode probe category where script order applies.
 
-6. **Probe ordering with >2 same-event probes**: Three or more probes on the same `opcode:*:before` event didn't reliably respect script order. Workaround: use per-function probes (one probe per function, each with a specific `fid == N` predicate) instead of grouped probes, so at most one probe matches any given instruction.
+6. **Probe ordering with >2 same-event probes** *(fixed in whamm v1.0.0)*: Three or more probes on the same `opcode:*:before` event didn't reliably respect script order, forcing per-function EC probes. Retested 2026-07-23 on v1.0.0: grouped probes respect script order; script_gen now groups EC probes by param signature.
 
-7. **Nested bound function call inside user lib argument crashes verifier**: Calling `r3_mem.check_mem_grow(mem_size(APP_MEMID) as i32)` panics at `verifier.rs:807` with `Option::unwrap() on a None value`. Generic — applies to any bound function (e.g. `active_data_len`) nested inside any user library call. Workaround: assign to a temp var first: `var _cp: u32 = mem_size(APP_MEMID); r3_mem.check_mem_grow(_cp as i32);`. Reported but not yet fixed.
+7. **Nested bound function call inside user lib argument crashes verifier** *(fixed in whamm v1.0.0)*: `r3_mem.check_mem_grow(mem_size(APP_MEMID) as i32)` used to panic at `verifier.rs:807`. Retested 2026-07-23 on v1.0.0: compiles, validates, runs; the `_cp` temp-var workaround is removed.
