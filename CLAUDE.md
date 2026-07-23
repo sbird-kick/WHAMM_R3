@@ -66,7 +66,7 @@ cd wizard-engine && PATH="$PWD/../virgil/bin:$PATH" ./build.sh wizeng jvm   # ma
 cd WHAMM_R3
 cargo build --manifest-path script_gen/Cargo.toml
 cargo build --manifest-path helper_lib/Cargo.toml --target wasm32-wasip1 --release
-./run_tests.sh -j "$(sysctl -n hw.ncpu 2>/dev/null || nproc)"    # expects 117/117 PASS
+./run_tests.sh -j 6    # expects 117/117 PASS. Max 6 jobs on this 8-core laptop — leave 2 cores free (user preference)
 # test_common.sh auto-picks wizeng.jvm on macOS / wizeng.x86-64-linux --jit on Linux; override with WIZENG env var.
 ```
 
