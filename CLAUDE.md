@@ -47,7 +47,7 @@ Systematic probe of every suspected coverage gap, oracle vs ours. Probe sources 
 - **[whamm#300](https://github.com/ejrgilbert/whamm/issues/300)** — `mem_size(memid)` and `page_size(memid)` bound functions. **Resolved**, used for MG detection at EC/IR boundaries.
 - **[whamm#301](https://github.com/ejrgilbert/whamm/issues/301)** — resolved fid from `call_indirect`. **Landed but unusable for us.** Tried switching from the 3-phase flag pattern to `if (resolved_fid == ...)` in `call_indirect:before`. Two problems:
   1. **Init-time only**: `resolved_fid` resolves the funcref using a static shadow table populated from the element segment. Any runtime `table.set` (or host table modification) makes the resolution stale, missing IC events.
-  2. **Recursive call_indirect trapped with `TABLE_OOB`** — filed as [whamm#314](https://github.com/ejrgilbert/whamm/issues/314), **fixed upstream** (`6628c2d`, in v1.0.0) with regression test `call_indirect/recursive.wast`. Standalone repro at `~/Downloads/claude-play-space/whamm_repro_resolved_fid_trap/`.
+  2. **Recursive call_indirect trapped with `TABLE_OOB`** — filed as [whamm#314](https://github.com/ejrgilbert/whamm/issues/314), **fixed upstream** (`6628c2d`, in v1.0.0) with regression test `call_indirect/recursive.wast`. (Local repro folder verified fixed against v1.0.0 and deleted 2026-07-23.)
   
   Reason 1 still stands even with the bug fixed, so we keep the 3-phase pattern (`tracking_indirect` → `func:entry` → `call_indirect:after`): `func:entry` sees the actual function being entered at runtime, regardless of how the table was populated.
 
