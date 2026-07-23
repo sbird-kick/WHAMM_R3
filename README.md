@@ -38,7 +38,7 @@ Value formatting: i32 and i64 are printed as signed decimal. f32 and f64 are pri
 
 - **Wizard Engine** ([github.com/titzer/wizard-engine](https://github.com/titzer/wizard-engine)): A WebAssembly engine written in Virgil. It has a built-in R3 monitor that serves as our oracle — the ground truth for what the correct trace should be. Run with `wizeng --monitors="r3{exclude=pattern}" module.wasm` to get the oracle trace.
 
-- **Virgil** ([github.com/titzer/virgil](https://github.com/titzer/virgil)): The programming language that Wizard is written in. Needed to run Wizard. We use the JVM backend (`wizeng.x86-64-linux --jit`), which requires OpenJDK. Set `VIRGIL_LOC` to point to the Virgil checkout.
+- **Virgil** ([github.com/titzer/virgil](https://github.com/titzer/virgil)): The programming language that Wizard is written in. Needed to build/run Wizard. On x86-64 Linux use the native binary (`bin/wizeng.x86-64-linux --jit`); on macOS (incl. arm64) use the JVM backend (`bin/wizeng.jvm`), which requires OpenJDK. `test_common.sh` picks the right default per platform; override with the `WIZENG` env var. Set `VIRGIL_LOC` to point to the Virgil checkout, and put `virgil/bin` on `PATH` when rebuilding Wizard (its `build.sh` needs `v3c`/`v3c-jar`).
 
 - **whamm** ([github.com/ejrgilbert/whamm](https://github.com/ejrgilbert/whamm)): A bytecode instrumentation framework for WebAssembly. You write a `.mm` script describing what to monitor, and whamm rewrites the wasm binary to include your monitoring code. Think of it like DTrace or eBPF, but for wasm. whamm also provides `whamm_core.wasm` — a runtime library needed by instrumented modules.
 
@@ -419,7 +419,7 @@ The wasm-r3 test modules simulate host behavior using local wasm functions whose
 ```
 claude-play-space/
 ├── virgil/              # Virgil compiler (set VIRGIL_LOC to this path)
-├── wizard-engine/       # Wizard Engine (JVM backend: bin/wizeng.x86-64-linux --jit)
+├── wizard-engine/       # Wizard Engine (Linux: bin/wizeng.x86-64-linux --jit; macOS: bin/wizeng.jvm)
 ├── whamm/               # whamm instrumentation framework
 │   └── target/
 │       ├── debug/whamm                              # whamm CLI binary
@@ -444,6 +444,12 @@ claude-play-space/
 ### Building
 
 ```bash
+# 0. (Only after updating virgil / wizard-engine) Rebuild the Wizard Engine oracle.
+#    Linux native:   cd wizard-engine && make x86-64-linux
+#    macOS (JVM backend; needs OpenJDK + virgil/bin on PATH for v3c/v3c-jar):
+cd wizard-engine
+PATH="$PWD/../virgil/bin:$PATH" ./build.sh wizeng jvm    # produces bin/wizeng.jvm.jar
+
 # 1. Build whamm (the instrumentation tool + its runtime library)
 cd whamm
 cargo build                                              # builds whamm CLI
@@ -461,6 +467,8 @@ cargo build
 ```
 
 ### Running a Single Test — Step by Step
+
+The commands below use the Linux binary; on macOS substitute `../wizard-engine/bin/wizeng.jvm` wherever `wizeng.x86-64-linux --jit` appears (the test harnesses do this automatically via `test_common.sh`).
 
 ```bash
 cd WHAMM_R3
@@ -592,15 +600,15 @@ Two C/C++ tests are excluded because Wizard's own R3 monitor crashes on them (`A
 
 Table events are blocked by missing whamm functionality. Once whamm adds support, they can be implemented with the same shadow-and-compare pattern used for L and G events.
 
-**T/TC/TG (Table events) — funcref operands not exposed.** T events require shadow table tracking: intercept `table.set` to update the shadow, intercept `table.get` to compare against the shadow and detect host modifications. This requires access to the funcref value and the entry index — but whamm does not expose `arg0`/`res0` for `table.get`, `table.set`, or `call_indirect`. Only `imm0` (the table index immediate) is available. Without the entry index and funcref operands, we cannot maintain a shadow table. The `call_indirect` flag pattern (used for IC/IR) gives us the resolved `fid` at `func:entry`, but not the table entry index, which the T event format requires. TC (table calls) and TG (table grows) are blocked by the same limitation. 4 of our 99 wasm-r3 tests produce T events (`table-get`, `table-get-big`, `table-imp-host-mod`, `table-exp-host-mod-multiple`) that we currently cannot match — the test harness excludes T from the grep filter so they appear as PASS. Tracked in [whamm#299](https://github.com/ejrgilbert/whamm/issues/299).
+**T/TC/TG (Table events) — funcref operands not exposed.** T events require shadow table tracking: intercept `table.set` to update the shadow, intercept `table.get` to compare against the shadow and detect host modifications. This requires access to the funcref value and the entry index — but whamm does not expose `arg0`/`res0` for `table.get`, `table.set`, or `call_indirect`. Only `imm0` (the table index immediate) is available. Without the entry index and funcref operands, we cannot maintain a shadow table. The `call_indirect` flag pattern (used for IC/IR) gives us the resolved `fid` at `func:entry`, but not the table entry index, which the T event format requires. TC (table calls) and TG (table grows) are blocked by the same limitation. 4 of our 99 wasm-r3 tests produce T events (`table-get`, `table-get-big`, `table-imp-host-mod`, `table-exp-host-mod-multiple`) that we currently cannot match — the test harness excludes T from the grep filter so they appear as PASS. Tracked in [whamm#299](https://github.com/ejrgilbert/whamm/issues/299) — **closed 2026-04-27 without implementation** (needs funcref/GC type support whamm doesn't have; maintainer offered to reopen via Slack if still needed). Also deprioritized per Ben Titzer: table mutation events can't really be done via bytecode rewriting and are exceedingly rare in practice.
 
 **call_indirect flag pattern** — our IC/IR detection for indirect calls uses a 3-phase flag pattern (`tracking_indirect` → `func:entry` → `call_indirect:after`). [whamm#301](https://github.com/ejrgilbert/whamm/issues/301) added a `resolved_fid` built-in that *would* let us replace this with a direct predicate, but we tried it and rolled back for two reasons:
 
 1. **`resolved_fid` is init-time only.** It resolves funcrefs using a shadow table that whamm populates from the element segment at instantiation. Any runtime `table.set` (or host modification of the table) makes the resolution stale, causing missed IC events. The 3-phase pattern uses `func:entry`, which sees the actual function entered at runtime regardless of how the table was populated.
 
-2. **Whamm bug: recursive `call_indirect` traps with `TABLE_OOB`.** When a probe references `resolved_fid` on `call_indirect:before` and the wasm code does recursive `call_indirect` (a function calling itself indirectly through the table), the instrumented module traps inside whamm's shadow-table lookup machinery — even though the original module runs fine and the table is fully static. Reproduced minimally with a 1-entry static table and a self-recursive function. A non-recursive `call_indirect` doesn't trigger the bug. Repro available at `~/Downloads/claude-play-space/whamm_repro_resolved_fid_trap/` (not committed).
+2. **Whamm bug (now fixed): recursive `call_indirect` trapped with `TABLE_OOB`.** When a probe referenced `resolved_fid` on `call_indirect:before` and the wasm code did recursive `call_indirect` (a function calling itself indirectly through the table), the instrumented module trapped inside whamm's shadow-table lookup machinery — even though the original module ran fine and the table was fully static. Reproduced minimally with a 1-entry static table and a self-recursive function (repro at `~/Downloads/claude-play-space/whamm_repro_resolved_fid_trap/`, not committed). Filed as [whamm#314](https://github.com/ejrgilbert/whamm/issues/314), **fixed upstream** (commit `6628c2d`, regression test `tests/wast_suite/events/wasm_opcodes/call_indirect/recursive.wast`), included in whamm v1.0.0.
 
-Combined: even on tests where the table never changes, the bug makes `resolved_fid` unsafe to use, and on tests where the table does change, it would be incorrect anyway. The 3-phase flag pattern works in all cases.
+With the bug fixed, reason 1 (init-time-only staleness) alone still rules out `resolved_fid` for correctness: any runtime table mutation makes it miss IC events. The 3-phase flag pattern works in all cases, so we keep it.
 
 **v128 / SIMD memory operations not tracked.** whamm has no `v128` type support — `WirmType::V128 => unimplemented!()` in the parser, and no `v128.load`/`v128.store` events defined in the YAML provider specs. We can't add shadow tracking for SIMD memory ops without a whamm-side feature for v128 bound variables (likely splitting v128 into two i64s for the user lib ABI). In practice, SIMD memory operations are rare in host-interaction scenarios.
 

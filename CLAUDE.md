@@ -6,6 +6,8 @@ Reimplementing Wizard Engine's R3 replay-recording monitor using whamm bytecode 
 
 **117/117 passing** via `./run_tests.sh` (103 wasm-r3 incl. 4 float-memory + 5 IG multi-module + 9 C/C++).
 
+Last verified **2026-07-23** on macOS arm64 (JVM backend) with: whamm master **v1.0.0** (`c461d20`), virgil `81f99693e`, wizard-engine `2ccc7300`. whamm previously lived on the `memory_bound_variables` branch — that's merged; use master now.
+
 ## Event coverage
 
 | Event | Status | Notes |
@@ -23,13 +25,13 @@ Reimplementing Wizard Engine's R3 replay-recording monitor using whamm bytecode 
 
 ## whamm feature request status
 
-- **[whamm#299](https://github.com/ejrgilbert/whamm/issues/299)** — `argN`/`resN` for `table.get` and `table.set` (requires GC type support in whamm). Would unblock T/TC/TG events. **Deprioritized** per Ben Titzer (co-founder of wasm): table mutation events can't really be done via bytecode rewriting and are exceedingly rare in practice (only 5 occurrences across 4 files in our 117-test suite).
+- **[whamm#299](https://github.com/ejrgilbert/whamm/issues/299)** — `argN`/`resN` for `table.get` and `table.set` (requires GC type support in whamm). Would unblock T/TC/TG events. **Closed 2026-04-27 without implementation** (maintainer: needs funcref type support whamm doesn't have; can reopen via Slack if needed). Also **deprioritized** per Ben Titzer (co-founder of wasm): table mutation events can't really be done via bytecode rewriting and are exceedingly rare in practice (only 5 occurrences across 4 files in our 117-test suite).
 - **[whamm#300](https://github.com/ejrgilbert/whamm/issues/300)** — `mem_size(memid)` and `page_size(memid)` bound functions. **Resolved**, used for MG detection at EC/IR boundaries.
 - **[whamm#301](https://github.com/ejrgilbert/whamm/issues/301)** — resolved fid from `call_indirect`. **Landed but unusable for us.** Tried switching from the 3-phase flag pattern to `if (resolved_fid == ...)` in `call_indirect:before`. Two problems:
   1. **Init-time only**: `resolved_fid` resolves the funcref using a static shadow table populated from the element segment. Any runtime `table.set` (or host table modification) makes the resolution stale, missing IC events.
-  2. **Recursive call_indirect traps with `TABLE_OOB`**: When a probe references `resolved_fid` and the wasm code does recursive `call_indirect` (a function indirectly calls itself), the instrumented module traps inside whamm's shadow-table machinery. Reproduced minimally with a 1-entry static table and a self-recursive function. Standalone repro at `~/Downloads/claude-play-space/whamm_repro_resolved_fid_trap/`. Worth filing as a whamm bug.
+  2. **Recursive call_indirect trapped with `TABLE_OOB`** — filed as [whamm#314](https://github.com/ejrgilbert/whamm/issues/314), **fixed upstream** (`6628c2d`, in v1.0.0) with regression test `call_indirect/recursive.wast`. Standalone repro at `~/Downloads/claude-play-space/whamm_repro_resolved_fid_trap/`.
   
-  We kept the 3-phase pattern (`tracking_indirect` → `func:entry` → `call_indirect:after`) because `func:entry` sees the actual function being entered at runtime, regardless of how the table was populated.
+  Reason 1 still stands even with the bug fixed, so we keep the 3-phase pattern (`tracking_indirect` → `func:entry` → `call_indirect:after`): `func:entry` sees the actual function being entered at runtime, regardless of how the table was populated.
 
 ## Key non-obvious decisions
 
@@ -57,10 +59,15 @@ Reimplementing Wizard Engine's R3 replay-recording monitor using whamm bytecode 
 ## Build & test
 
 ```bash
+# Rebuild deps after updating their repos:
+cd whamm && cargo build && cargo build --target wasm32-wasip1 --release -p whamm_core
+cd wizard-engine && PATH="$PWD/../virgil/bin:$PATH" ./build.sh wizeng jvm   # macOS oracle (needs OpenJDK); Linux: make x86-64-linux
+
 cd WHAMM_R3
 cargo build --manifest-path script_gen/Cargo.toml
 cargo build --manifest-path helper_lib/Cargo.toml --target wasm32-wasip1 --release
-./run_tests.sh -j 32    # expects 117/117 PASS (uses wizeng.x86-64-linux --jit)
+./run_tests.sh -j "$(sysctl -n hw.ncpu 2>/dev/null || nproc)"    # expects 117/117 PASS
+# test_common.sh auto-picks wizeng.jvm on macOS / wizeng.x86-64-linux --jit on Linux; override with WIZENG env var.
 ```
 
 ## User preferences
