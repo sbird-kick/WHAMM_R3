@@ -4,7 +4,7 @@ Reimplementing Wizard Engine's R3 replay-recording monitor using whamm bytecode 
 
 ## Test status
 
-**117/117 passing** via `./run_tests.sh` (103 wasm-r3 incl. 4 float-memory + 5 IG multi-module + 9 C/C++).
+**119/119 passing** via `./run_tests.sh` (103 wasm-r3 incl. 4 float-memory + 2 gen_tests + 5 IG multi-module + 9 C/C++). `gen_tests/` holds our own generated/regression tests (committed .wat + .wasm; rebuild: `wat2wasm --debug-names [--enable-multi-memory] x.wat -o x.wasm`).
 
 Last verified **2026-07-23** on macOS arm64 (JVM backend) with: whamm master **v1.0.0** (`c461d20`), virgil `81f99693e`, wizard-engine `2ccc7300`. whamm previously lived on the `memory_bound_variables` branch — that's merged; use master now.
 
@@ -15,13 +15,27 @@ Last verified **2026-07-23** on macOS arm64 (JVM backend) with: whamm master **v
 | EC (External Call) | Done | Per-function `opidx == 0` probes with call_depth state machine |
 | IC (Import Call) | Done | Direct: `call:before`. Indirect: `call_indirect` → `func:entry` flag pattern |
 | IR (Import Return) | Done | Direct: `call:after` grouped by return type. Indirect: `call_indirect:after` |
-| L (Load) | Done | Shadow memory (`Vec<u8>`), seeded from data segments. Tracks i32/i64/f32/f64 loads & stores (all sub-word variants). v128/SIMD not tracked (whamm has no v128 type support) |
+| L (Load) | Done | Per-memory shadows (`Vec<Vec<u8>>`), seeded from data segments; L prints real memidx. Tracks i32/i64/f32/f64 loads & stores (all sub-word variants), memory.fill/copy/grow, and memory.init from passive segments (registered at @init, 64KB cap). v128/SIMD not tracked (whamm has no v128 type support); cross-memory memory.copy unroutable (whamm exposes one memidx imm) |
 | G (Global Get) | Done | Shadow globals (`Vec<i64>`), tracks exported + imported mutable globals |
 | IG (Import Global) | Done | One-shot `global.get:after` per imported global, reordered at print time |
-| MG (Memory Grow) | Done | Uses `mem_size(APP_MEMID)` at EC/IR boundaries to detect any grow (whamm#300 resolved) |
+| MG (Memory Grow) | Done | Uses `mem_size(APP_MEMID)` at EC/IR boundaries to detect any grow (whamm#300 resolved). Per-memory page tracking; boundary checks cover memory 0 only — host-side grows of memory != 0 are undetectable |
 | T (Table Get) | Blocked | Needs whamm#299 (funcref/GC type support for `table.get`/`table.set`) |
 | TC (Table Call) | Blocked | Needs whamm#299 |
 | TG (Table Grow) | Blocked | Needs whamm#299 |
+
+## Gap audit (2026-07-23)
+
+Systematic probe of every suspected coverage gap, oracle vs ours. Probe sources in `gen_tests/` (fixed ones) and the repro dirs (reported ones):
+
+| Gap | Verdict | Status |
+|-----|---------|--------|
+| memory.init from passive segments | Our gap | **Fixed** — passive bytes registered @init, `memory.init:before` probe updates shadow. Regression: `gen_tests/gap_meminit` |
+| Multi-memory L/MG | Our gap | **Fixed** — per-memory shadows via whamm's static `memory` bound var. Regression: `gen_tests/gap_multimem`. Limits: cross-memory `memory.copy` unroutable; MG boundary checks memory-0-only |
+| Multi-value IR (2+ results) | whamm bug | Probe with `(res0, res1)` bounds on `call:after` silently never fires. Repro: `../whamm_repro_multivalue_resn/` — **report upstream** |
+| Trace lost on trap | whamm feature gap | `wasm:report` output isn't flushed when app traps; Wizard's R3 prints its trace on trap. Repro: `../whamm_repro_report_on_trap/` — **request upstream** |
+| IG for never-read imported globals | whamm feature gap | Oracle records IG for all imported globals at instantiation; we can only observe `global.get` executions. Needs a whamm primitive to read an app global at init. Probe: scratchpad `gap_ig_unread` |
+| start functions | Wizard oracle bug | Oracle crashes: `R3MonitorError: external call with table_get failed` at `onFuncEntry`. Skip category (like complex/fibonacci) — worth reporting to Titzer |
+| Tail calls (`return_call`) | Oracle semantics unclear | Oracle emits no IC for a tail call into an excluded fn and no EC for the next export call; both look wrong. Skip category; ask Titzer what R3 semantics should be |
 
 ## whamm feature request status
 

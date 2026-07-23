@@ -516,10 +516,11 @@ export VIRGIL_LOC=../virgil
 ./run_tests.sh -j 4
 ```
 
-`run_tests.sh` runs three test suites:
+`run_tests.sh` runs four test suites:
 1. **wasm-r3** (103 tests, includes 4 float-memory tests): `test_one.sh` with `--exclude "r3"` — excluded functions simulate the host
-2. **IG** (5 tests): `test_ig.sh` with multi-module pairs (host + consumer)
-3. **C/C++** (9 tests): `test_c.sh` with `--exclude-imports` — actual wasm imports act as host
+2. **gen_tests** (our own generated/regression tests, committed as .wat + .wasm pairs): same harness as wasm-r3. Rebuild a .wasm with `wat2wasm --debug-names [--enable-multi-memory] x.wat -o x.wasm`
+3. **IG** (5 tests): `test_ig.sh` with multi-module pairs (host + consumer)
+4. **C/C++** (9 tests): `test_c.sh` with `--exclude-imports` — actual wasm imports act as host
 
 Each test independently generates a `.mm`, instruments, runs both oracle and ours, and diffs. Output is one line per test: `PASS name`, `ORDER name` (correct events, wrong order), or `FAIL name`. The wasm-r3 and C/C++ suites run in parallel; IG tests run sequentially.
 
@@ -610,6 +611,16 @@ Table events are blocked by missing whamm functionality. Once whamm adds support
 With the bug fixed, reason 1 (init-time-only staleness) alone still rules out `resolved_fid` for correctness: any runtime table mutation makes it miss IC events. The 3-phase flag pattern works in all cases, so we keep it.
 
 **v128 / SIMD memory operations not tracked.** whamm has no `v128` type support — `WirmType::V128 => unimplemented!()` in the parser, and no `v128.load`/`v128.store` events defined in the YAML provider specs. We can't add shadow tracking for SIMD memory ops without a whamm-side feature for v128 bound variables (likely splitting v128 into two i64s for the user lib ABI). In practice, SIMD memory operations are rare in host-interaction scenarios.
+
+**Multi-value import returns (IR) not recorded.** A `call:after` probe with two result bindings (`res0`, `res1`) silently never fires — whamm bug, standalone repro at `../whamm_repro_multivalue_resn/`. Until fixed upstream, calls to multi-value host functions lose their IR events.
+
+**Trace lost when the app traps.** whamm's `wasm:report` output isn't flushed on trap, so a trapping recording produces no trace at all; Wizard's built-in R3 monitor prints its trace even on trap. Feature request material — repro at `../whamm_repro_report_on_trap/`.
+
+**IG events for never-read imported globals.** The oracle records IG for every imported global at instantiation; we can only observe executed `global.get`s, so an imported global the module never reads produces no IG event from us. Needs a whamm primitive for reading an app global at init time.
+
+**start functions / tail calls: excluded, oracle-side problems (2026-07-23 audit).** Wizard's R3 monitor crashes on modules with a `(start)` function (`R3MonitorError: external call with table_get failed`), and its `return_call` handling emits neither IC for a tail call into an excluded function nor EC for the following export call — both look wrong. Both categories are skipped in our test generation until the oracle's behavior is clarified.
+
+**Cross-memory `memory.copy` (multi-memory) unroutable.** whamm exposes only one memidx immediate on `memory.copy`, so a copy between two different memories can't update both shadows correctly. Same-memory copies (the overwhelmingly common case) are fully tracked.
 
 ### Other limitations
 
