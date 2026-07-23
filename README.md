@@ -614,7 +614,7 @@ With the bug fixed, reason 1 (init-time-only staleness) alone still rules out `r
 
 **v128 / SIMD memory operations not tracked.** whamm has no `v128` type support — `WirmType::V128 => unimplemented!()` in the parser, and no `v128.load`/`v128.store` events defined in the YAML provider specs. We can't add shadow tracking for SIMD memory ops without a whamm-side feature for v128 bound variables (likely splitting v128 into two i64s for the user lib ABI). In practice, SIMD memory operations are rare in host-interaction scenarios.
 
-**Multi-value import returns (IR) not recorded.** A `call:after` probe with two result bindings (`res0`, `res1`) silently never fires — whamm bug, standalone repro at `../whamm_repro_multivalue_resn/`. Until fixed upstream, calls to multi-value host functions lose their IR events.
+**Multi-value import returns (IR) not recorded.** Our gap, not a whamm bug (an earlier repro claiming the probe "never fires" was flawed — audited and deleted 2026-07-23). whamm's `resN` bindings are stack-ordered like `argN`: `res0` is the top of stack, i.e. the *last* result, so a function returning `(i32 i64)` needs `(res0: i64, res1: i32)`; spelled that way the two-result `call:after` probe fires (whamm's own `resN/use-resN.mm` test covers three results). script_gen doesn't emit multi-value IR probes yet because no test exercises a multi-value import; add reversed-order resN grouping when one does.
 
 **Trace lost when the app traps.** whamm's `wasm:report` output isn't flushed on trap, so a trapping recording produces no trace at all; Wizard's built-in R3 monitor prints its trace even on trap. Feature request material — repro at `../whamm_repro_report_on_trap/`.
 
