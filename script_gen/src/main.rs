@@ -137,6 +137,9 @@ fn parse_wasm(bytes: &[u8]) -> WasmInfo {
 
 fn find_excluded(names: &HashMap<u32, String>, pattern: &str) -> Vec<u32> {
     let pfx = pattern.trim_end_matches('*');
+    // An empty pattern means "no name-based exclusion", not "exclude every
+    // named function" (test_c.sh passes --exclude "" and relies on this).
+    if pfx.is_empty() { return Vec::new(); }
     let mut ids: Vec<u32> = names.iter().filter(|(_, n)| n.starts_with(pfx)).map(|(id, _)| *id).collect();
     ids.sort(); ids
 }

@@ -23,6 +23,14 @@ echo "Running generated tests (parallel=$JOBS)..."
 ls gen_tests/*.wasm 2>/dev/null \
     | xargs -P "$JOBS" -I{} ./test_one.sh {} >> "$RESULTS" 2>/dev/null
 
+echo "Running generated native (C/C++/Rust) tests (parallel=$JOBS)..."
+ls gen_tests_native/*.wasm 2>/dev/null \
+    | xargs -P "$JOBS" -I{} ./test_c.sh {} >> "$RESULTS" 2>/dev/null
+
+echo "Running generated multi-module tests (parallel=$JOBS)..."
+ls gen_tests_multi/*.wasm 2>/dev/null | grep -v '_host\.wasm$' \
+    | xargs -P "$JOBS" -I{} ./test_ig.sh {} >> "$RESULTS" 2>/dev/null
+
 echo "Running IG tests..."
 for f in ig_tests/ig_basic.wasm ig_tests/ig_multi_type.wasm ig_tests/ig_zero.wasm \
          ig_tests/ig_with_calls.wasm ig_tests/ig_mutable.wasm; do
@@ -30,8 +38,7 @@ for f in ig_tests/ig_basic.wasm ig_tests/ig_multi_type.wasm ig_tests/ig_zero.was
 done
 
 echo "Running C/C++ tests (parallel=$JOBS)..."
-# complex and fibonacci crash wizard's oracle — skip them
-ls c_tests/*.wasm 2>/dev/null | grep -v 'complex\|fibonacci' \
+ls c_tests/*.wasm 2>/dev/null \
     | xargs -P "$JOBS" -I{} ./test_c.sh {} >> "$RESULTS" 2>/dev/null
 
 # Summary
