@@ -1,1 +1,7 @@
-whamm: instr stack-overflows (SIGABRT "thread 'main' has overflowed its stack") on SQLite amalgamation module (2332 fns, ~718KB); with 64MB stack it no longer crashes but instr does not finish within 2min. Likely recursive instruction/AST walker blows the stack on SQLite's giant functions (e.g. sqlite3VdbeExec). Repro: build .c per db_BUILD.txt, then `whamm instr` with the r3 .mm. SQLite unshippable as an instrumented diff test until fixed.
+whamm: THROUGHPUT ONLY (corrected 2026-07-25). The original SIGABRT was the
+deep-predicate overflow (pre-fix script_gen emitted a flat 2337-term chain);
+with balanced predicates the module instruments without crashing but takes
+>10min in debug whamm. A synthetic single-function sweep to 4,000,000 flat
+instructions never crashed, ruling out a separate giant-function walker bug.
+Runs correctly uninstrumented (count=20 sum=118 max=12). Blocked on whamm
+instrumentation speed, nothing else.
