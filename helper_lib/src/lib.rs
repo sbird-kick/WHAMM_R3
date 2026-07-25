@@ -30,12 +30,14 @@ struct State {
     building: Option<EventBuilder>,
     names: HashMap<u32, String>,
     shadow_pages: Vec<u32>,         // per-memory page count for MG detection
+    pages_registered: Vec<bool>,    // true once init_mem_pages seeded the baseline
     passive: HashMap<u32, Vec<u8>>, // passive data segments, registered at @init
 }
 
 static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
     shadows: Vec::new(), shadow_globals: Vec::new(), trace: Vec::new(),
-    building: None, names: HashMap::new(), shadow_pages: Vec::new(), passive: HashMap::new(),
+    building: None, names: HashMap::new(), shadow_pages: Vec::new(),
+    pages_registered: Vec::new(), passive: HashMap::new(),
 }));
 
 fn shadow_of(s: &mut State, mem: u32) -> &mut Vec<u8> {
@@ -217,6 +219,21 @@ pub fn shadow_global_set(idx: i32, val: i64) {
     s.shadow_globals[idx as usize] = val;
 }
 
+// Float shadows hold IEEE bits, matching check_global_f32/f64.
+#[no_mangle]
+pub fn shadow_global_set_f32(idx: i32, val: f32) {
+    let mut s = STATE.lock().unwrap();
+    ensure_globals(&mut s, idx as u32);
+    s.shadow_globals[idx as usize] = val.to_bits() as i64;
+}
+
+#[no_mangle]
+pub fn shadow_global_set_f64(idx: i32, val: f64) {
+    let mut s = STATE.lock().unwrap();
+    ensure_globals(&mut s, idx as u32);
+    s.shadow_globals[idx as usize] = val.to_bits() as i64;
+}
+
 #[no_mangle]
 pub fn check_global_i32(idx: i32, val: i32) {
     let mut s = STATE.lock().unwrap();
@@ -315,13 +332,28 @@ pub fn record_ig_f64(idx: i32, val: f64) {
     STATE.lock().unwrap().trace.push(TraceEvent::ImportGlobal { idx: idx as u32, formatted: format!("0x{:X}", val.to_bits()) });
 }
 
+// Seed the MG baseline from the module's DECLARED initial page count (@init).
+// Without this, a host-side grow before the first EC/IR boundary would be
+// silently adopted as the baseline instead of emitting MG (the oracle
+// baselines at instantiation).
+#[no_mangle]
+pub fn init_mem_pages(mem: i32, pages: i32) {
+    let mut s = STATE.lock().unwrap();
+    let mi = mem as usize;
+    if mi >= s.shadow_pages.len() { s.shadow_pages.resize(mi + 1, 0); }
+    if mi >= s.pages_registered.len() { s.pages_registered.resize(mi + 1, false); }
+    s.shadow_pages[mi] = pages as u32;
+    s.pages_registered[mi] = true;
+}
+
 #[no_mangle]
 pub fn check_mem_grow(mem: i32, current_pages: i32) {
     let mut s = STATE.lock().unwrap();
     let (mi, current) = (mem as usize, current_pages as u32);
     if mi >= s.shadow_pages.len() { s.shadow_pages.resize(mi + 1, 0); }
-    if s.shadow_pages[mi] == 0 {
-        // First call: initialize without emitting MG
+    let registered = s.pages_registered.get(mi).copied().unwrap_or(false);
+    if !registered && s.shadow_pages[mi] == 0 {
+        // Fallback for memories the generator didn't register: baseline lazily.
         s.shadow_pages[mi] = current;
     } else if current > s.shadow_pages[mi] {
         let growth = current - s.shadow_pages[mi];

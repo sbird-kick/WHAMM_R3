@@ -1,0 +1,8 @@
+(module
+  (global $s (mut i32) (i32.const 16))
+  (func (export "f0") (result i32) global.get $s i32.const 35 i32.xor global.set $s global.get $s)
+  (func (export "f1") (result i32) global.get $s i32.const 33 i32.sub global.set $s global.get $s)
+  (func (export "f2") (result i32) global.get $s i32.const 23 i32.or global.set $s global.get $s)
+  (func (export "f3") (result i32) global.get $s i32.const 21 i32.add global.set $s global.get $s)
+  (func (export "f4") (result i32) global.get $s i32.const 35 i32.mul global.set $s global.get $s)
+)

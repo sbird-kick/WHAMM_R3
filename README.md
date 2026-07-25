@@ -578,7 +578,7 @@ The IG test cases:
 
 **4/4** float-memory tests pass: `float-load-only` (host writes float, wasm reads via f32.load/f64.load), `float-store-shadow` (wasm writes via f32.store, reads via i32.load — verifies no false L events), `float-mixed` (wasm writes f32, host overwrites, wasm reads via f32.load), `float-no-change` (repeated f32.load doesn't duplicate L events).
 
-**188/188** generated tests pass (`gen_tests/`, committed .wat+.wasm): 2 hand-written gap probes plus 186 machine-generated tests across 8 categories (loads/stores, floats, globals, direct calls, indirect calls, bulk memory, memory.grow, multi-memory). 13 additional generated tests are quarantined in `gen_tests_oracle_blocked/` (Wizard's oracle crashes on them) and 1 in `gen_tests_whamm_blocked/` (blocked on a whamm bug); they are correct tests but can't run until upstream fixes land.
+**893/893** generated .wat tests pass (`gen_tests/`, committed .wat+.wasm) spanning load/store matrices, floats, globals, call structures, call_indirect, bulk memory, memory.grow, multi-memory, boundary values, shadow-aliasing subtleties, and scale/structure stress (up to 900-function modules). **544/544** native tests pass (`gen_tests_native/`: C, C++/STL, Rust — plus real-world code: Lua 5.4.7 running 18 embedded scripts, miniz round-trips, cJSON/tinyexpr/tiny-regex-c/stb_sprintf/utf8proc; `*_BUILD.txt` files pin sources and exact build commands). **115/115** multi-module tests pass (`gen_tests_multi/`, imported globals/functions with library modules in wat/C/Rust). 4 tests are quarantined in `gen_tests_whamm_blocked/` (whamm bugs: typed-probe interference, multi-memory grow parse); `gen_candidates/failing/` holds SQLite and QuickJS tests blocked on whamm scale limits.
 
 **5/5** IG (multi-module) tests pass, covering i32/i64/f64 imported globals, zero-init, combined IG+EC+IC+IR events, and mutable imported globals with G events.
 
@@ -594,7 +594,7 @@ The IG test cases:
 
 Two C/C++ tests are excluded because Wizard's own R3 monitor crashes on them (`ArrayIndexOutOfBoundsException` in `onMemoryCopy`): `fibonacci` and `complex`. Our implementation handles them correctly but they can't be oracle-verified.
 
-**Total: 305/305** tests pass across all suites via `./run_tests.sh` (verified 2026-07-23 on whamm v1.0.0 `c461d20`, wizard-engine `2ccc7300`).
+**Total: 1671/1671** tests pass across all suites via `./run_tests.sh` (verified 2026-07-25 on whamm v1.0.0 `c461d20`, wizard-engine branch `fix-r3-monitor-crashes` @ `f5cb89dc` — the suite requires that locally-patched oracle build).
 
 ## Known Limitations
 

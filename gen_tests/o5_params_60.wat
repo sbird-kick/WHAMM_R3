@@ -1,0 +1,66 @@
+(module
+  (memory (export "memory") 1)
+  (func $r3_main (export "_start") (export "main")
+    i32.const 9505
+    i32.const 9518
+    i32.const 9531
+    i32.const 9544
+    i32.const 9557
+    i32.const 9570
+    i32.const 9583
+    i32.const 9596
+    i32.const 9609
+    i32.const 9622
+    i32.const 9635
+    i32.const 9648
+    i32.const 9661
+    i32.const 9674
+    i32.const 9687
+    i32.const 9700
+    i32.const 9713
+    i32.const 9726
+    i32.const 9739
+    i32.const 9752
+    i32.const 9765
+    i32.const 9778
+    i32.const 9791
+    i32.const 9804
+    i32.const 9817
+    i32.const 9830
+    i32.const 9843
+    i32.const 9856
+    i32.const 9869
+    i32.const 9882
+    i32.const 9895
+    i32.const 9908
+    i32.const 9921
+    i32.const 9934
+    i32.const 9947
+    i32.const 9960
+    i32.const 9973
+    i32.const 9986
+    i32.const 9999
+    i32.const 10012
+    i32.const 10025
+    i32.const 10038
+    i32.const 10051
+    i32.const 10064
+    i32.const 10077
+    i32.const 10090
+    i32.const 10103
+    i32.const 10116
+    i32.const 10129
+    i32.const 10142
+    i32.const 10155
+    i32.const 10168
+    i32.const 10181
+    i32.const 10194
+    i32.const 10207
+    i32.const 10220
+    i32.const 10233
+    i32.const 10246
+    i32.const 10259
+    i32.const 10272
+    call $app_f)
+  (func $app_f (export "app_f") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) i32.const 40 i32.load drop)
+)

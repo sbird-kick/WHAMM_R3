@@ -1,0 +1,58 @@
+db_* real-world differential tests — reproducible build recipe
+==============================================================
+
+Toolchain (pre-built, do not rebuild):
+  CC = /Users/humza/Downloads/claude-play-space/wasi-sdk/bin/clang   (wasm32-wasip1)
+  Verify a test with:  cd WHAMM_R3 && ./test_c.sh gen_tests_native/<name>.wasm   -> "PASS <name>"
+
+1. FETCH UPSTREAM SOURCES  (kept OUT of the repo)
+-------------------------------------------------
+  DB_SRC=/Users/humza/.claude/jobs/33c02e0d/tmp/db_src
+  mkdir -p "$DB_SRC" && cd "$DB_SRC"
+
+  # miniz 3.0.2 (single-file amalgamation ships inside the release zip)
+  curl -sL -o miniz.zip https://github.com/richgel999/miniz/releases/download/3.0.2/miniz-3.0.2.zip
+  mkdir -p miniz-3.0.2 && (cd miniz-3.0.2 && unzip -oq ../miniz.zip)   # -> miniz-3.0.2/miniz.c, miniz.h
+
+  # SQLite amalgamation 3.46.1  (used only by the classified-failing SQLite repro)
+  curl -sL -o sqlite-amalgamation.zip https://www.sqlite.org/2024/sqlite-amalgamation-3460100.zip
+  unzip -oq sqlite-amalgamation.zip                                   # -> sqlite-amalgamation-3460100/sqlite3.c, .h
+
+2. BUILD THE .wasm TESTS
+------------------------
+  cd WHAMM_R3
+  DB_SRC="$DB_SRC" bash gen_tests_native/db_build.sh
+  # Compiles all 8 db_zlib_*.wasm. Flags (see db_build.sh):
+  #   -Oz -DMINIZ_NO_STDIO -DMINIZ_NO_TIME -DMINIZ_NO_ARCHIVE_APIS
+  #   -ffunction-sections -fdata-sections -Wl,--gc-sections -I <miniz>
+  #   decompress-only tests (05,06) add -DMINIZ_NO_DEFLATE_APIS
+
+3. BAKED TEST VECTORS  (embedded in db_zlib_decompress_05.c / db_zlib_rawdeflate_06.c)
+-------------------------------------------------------------------------------------
+  The compressed byte arrays in tests 05 and 06 were produced once, deterministically,
+  by a NATIVE (host cc) miniz build, then pasted into the .c files:
+
+    05  VEC[267] = mz_compress( 256-byte LCG buffer, seed 0x1234567 )  -> zlib stream
+                   raw adler=dac18015 crc=5b236695
+    06  VEC[36]  = tdefl_compress_mem_to_mem( 240-byte "the quick brown fox " tiling,
+                   TDEFL_DEFAULT_MAX_PROBES )                          -> raw deflate
+                   raw adler=78f757e5
+  Regenerate (host):
+    cc -I $DB_SRC/miniz-3.0.2 -DMINIZ_NO_STDIO -DMINIZ_NO_TIME -DMINIZ_NO_ARCHIVE_APIS \
+       <generator>.c $DB_SRC/miniz-3.0.2/miniz.c -o gen && ./gen
+
+4. SQLITE — CLASSIFIED FAILING (whamm bug), see gen_candidates/failing/
+-----------------------------------------------------------------------
+  Build recipe (also in db_build.sh, sqlite_build()):
+    clang -Oz -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DEFAULT_MEMSTATUS=0 \
+      -DSQLITE_DQS=0 -DSQLITE_TEMP_STORE=3 -DSQLITE_OMIT_DEPRECATED \
+      -ffunction-sections -fdata-sections -Wl,--gc-sections -I <sqlite> \
+      db_sqlite_basic_01.c <sqlite>/sqlite3.c -o db_sqlite_basic_01.wasm
+  The .wasm runs & is deterministic under wizeng (count=20 sum=118 max=12), but
+  `whamm instr` STACK-OVERFLOWS on it (2332 fns); see the .note.txt.
+  NOTE: do NOT add -DSQLITE_OMIT_AUTOINIT — it skips default-VFS registration and
+  makes sqlite3_open() call a null VFS pointer -> FUNC_INVALID trap.
+
+KEPT TESTS (all PASS): db_zlib_roundtrip_01, db_zlib_pseudorandom_02,
+  db_zlib_incompressible_03, db_zlib_levels_04, db_zlib_decompress_05,
+  db_zlib_rawdeflate_06, db_zlib_checksums_07, db_zlib_multibuf_08

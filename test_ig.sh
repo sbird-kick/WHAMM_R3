@@ -19,9 +19,12 @@ TMP="/tmp/r3_ig_$$_${NAME}"
     --output-path "${TMP}_instr.wasm" 2>/dev/null \
     || { echo "FAIL $NAME (instr)"; rm -f "${TMP}"*; exit 0; }
 
-# Oracle: deduplicate IG events (wizard bug in multi-module mode)
+# Oracle: deduplicate IG events only (wizard bug in multi-module mode).
+# Deduping the whole trace would collapse legitimately repeated lines,
+# e.g. an import called twice producing two identical IC lines.
 ORACLE=$($WIZENG --monitors="r3" "$HOST" "$WASM" 2>&1 \
-    | grep -E '^(L|EC|IC|IR|G|MG|IG);' | awk '!seen[$0]++' || true)
+    | grep -E '^(L|EC|IC|IR|G|MG|IG);' \
+    | awk '/^IG;/ { if (seen[$0]++) next } { print }' || true)
 
 OURS=$($WIZENG "$WHAMM_CORE" "$R3_MEM" "$HOST" "${TMP}_instr.wasm" 2>&1 \
     | grep -E '^(L|EC|IC|IR|G|MG|IG);' || true)

@@ -1,0 +1,97 @@
+misc_ real-world library differential tests — fetch + build notes
+=================================================================
+
+Author: misc_ fleet (grab-bag of niche single-file C libraries -> wasm32-wasip1).
+Every test is a main() driving a real upstream library on FIXED inputs and
+printing computed results; verified with ./test_c.sh printing "PASS <name>".
+
+Toolchain (already built; DO NOT rebuild):
+  CC = /Users/humza/Downloads/claude-play-space/wasi-sdk/bin/clang
+  (wasi-libc, target wasm32-wasip1; has libm; no threads/files-beyond-stdio)
+
+All sources were fetched OUT of the repo, into a scratch dir:
+  SRC=/Users/humza/.claude/jobs/33c02e0d/tmp/misc_src   (not committed)
+The exact commands below reproduce that dir from scratch.
+
+-----------------------------------------------------------------
+LIBRARY SOURCES (pinned)
+-----------------------------------------------------------------
+mkdir -p "$SRC" && cd "$SRC"
+
+# cJSON 1.7.18 (tagged release) — DaveGamble/cJSON
+curl -sL https://raw.githubusercontent.com/DaveGamble/cJSON/v1.7.18/cJSON.c -o cJSON.c
+curl -sL https://raw.githubusercontent.com/DaveGamble/cJSON/v1.7.18/cJSON.h -o cJSON.h
+
+# tinyexpr @ 4a7456e2eab88b4c76053c1c4157639ccb930e2b — codeplea/tinyexpr
+curl -sL https://raw.githubusercontent.com/codeplea/tinyexpr/4a7456e2eab88b4c76053c1c4157639ccb930e2b/tinyexpr.c -o tinyexpr.c
+curl -sL https://raw.githubusercontent.com/codeplea/tinyexpr/4a7456e2eab88b4c76053c1c4157639ccb930e2b/tinyexpr.h -o tinyexpr.h
+
+# tiny-regex-c @ f2632c6d9ed25272987471cdb8b70395c2460bdb — kokke/tiny-regex-c
+curl -sL https://raw.githubusercontent.com/kokke/tiny-regex-c/f2632c6d9ed25272987471cdb8b70395c2460bdb/re.c -o re.c
+curl -sL https://raw.githubusercontent.com/kokke/tiny-regex-c/f2632c6d9ed25272987471cdb8b70395c2460bdb/re.h -o re.h
+
+# stb_sprintf @ nothings/stb 31c1ad37456438565541f4919958214b6e762fb4 (header-only)
+curl -sL https://raw.githubusercontent.com/nothings/stb/31c1ad37456438565541f4919958214b6e762fb4/stb_sprintf.h -o stb_sprintf.h
+
+# utf8proc 2.9.0 (tagged release) — JuliaStrings/utf8proc
+#   utf8proc.c self-#includes utf8proc_data.c, so both must be present but only
+#   utf8proc.c is passed to clang.
+curl -sL https://raw.githubusercontent.com/JuliaStrings/utf8proc/v2.9.0/utf8proc.c -o utf8proc.c
+curl -sL https://raw.githubusercontent.com/JuliaStrings/utf8proc/v2.9.0/utf8proc.h -o utf8proc.h
+curl -sL https://raw.githubusercontent.com/JuliaStrings/utf8proc/v2.9.0/utf8proc_data.c -o utf8proc_data.c
+
+# SHA-256 of the exact source files used:
+#   75c51de8...  cJSON.c
+#   0578cc29...  cJSON.h
+#   1d81271c...  tinyexpr.c
+#   4d7a0c30...  tinyexpr.h
+#   846f87cd...  re.c
+#   8ba52081...  re.h
+#   e0b8c56e...  stb_sprintf.h
+#   fe5255fb...  utf8proc.c
+#   29a3a516...  utf8proc.h
+#   f5538036...  utf8proc_data.c
+
+-----------------------------------------------------------------
+BUILD (run from gen_tests_native/, with SRC set as above)
+-----------------------------------------------------------------
+CC=/Users/humza/Downloads/claude-play-space/wasi-sdk/bin/clang
+
+# cJSON (link the amalgamated cJSON.c; hide symbols to avoid export clutter)
+for n in 1 2 3; do
+  $CC -O1 -I$SRC -DCJSON_HIDE_SYMBOLS misc_cjson_$n.c   $SRC/cJSON.c    -o misc_cjson_$n.wasm
+done
+
+# tinyexpr (needs libm for pow/sin/etc.)
+for n in 1 2 3; do
+  $CC -O1 -I$SRC misc_tinyexpr_$n.c $SRC/tinyexpr.c -lm -o misc_tinyexpr_$n.wasm
+done
+
+# tiny-regex-c
+for n in 1 2 3; do
+  $CC -O1 -I$SRC misc_regex_$n.c    $SRC/re.c            -o misc_regex_$n.wasm
+done
+
+# stb_sprintf (header-only; STB_SPRINTF_IMPLEMENTATION #defined inside each .c)
+for n in 1 2; do
+  $CC -O1 -I$SRC misc_stbsp_$n.c                         -o misc_stbsp_$n.wasm
+done
+
+# utf8proc (only utf8proc.c on the command line; it #includes utf8proc_data.c)
+for n in 1 2; do
+  $CC -O1 -I$SRC -DUTF8PROC_STATIC misc_utf8proc_$n.c $SRC/utf8proc.c -o misc_utf8proc_$n.wasm
+done
+
+-----------------------------------------------------------------
+VERIFY
+-----------------------------------------------------------------
+cd /Users/humza/Downloads/claude-play-space/WHAMM_R3
+for f in gen_tests_native/misc_*.wasm; do ./test_c.sh "$f"; done   # each prints "PASS <name>"
+
+Notes:
+- Determinism: all inputs are fixed literals; floating results are printed as
+  scaled integers or FNV checksums so no textual float formatting can diverge.
+- Timing: harness wall time is ~75-90s/test, dominated by JVM startup +
+  instrumentation of the (large) library modules, not by the test's own compute.
+- No test traps under plain wizeng (verified) — required, since a wasm trap
+  loses the R3 trace.

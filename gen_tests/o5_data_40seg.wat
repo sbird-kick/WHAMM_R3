@@ -1,0 +1,56 @@
+(module
+  (memory (export "memory") 2)
+  (func $r3_main (export "_start") (export "main") call $r3_poke call $app_read)
+  (data (i32.const 0) "\21\22\23\24")
+  (data (i32.const 16) "\22\23\24\25")
+  (data (i32.const 32) "\23\24\25\26")
+  (data (i32.const 48) "\24\25\26\27")
+  (data (i32.const 64) "\25\26\27\28")
+  (data (i32.const 80) "\26\27\28\29")
+  (data (i32.const 96) "\27\28\29\2a")
+  (data (i32.const 112) "\28\29\2a\2b")
+  (data (i32.const 128) "\29\2a\2b\2c")
+  (data (i32.const 144) "\2a\2b\2c\2d")
+  (data (i32.const 160) "\2b\2c\2d\2e")
+  (data (i32.const 176) "\2c\2d\2e\2f")
+  (data (i32.const 192) "\2d\2e\2f\30")
+  (data (i32.const 208) "\2e\2f\30\31")
+  (data (i32.const 224) "\2f\30\31\32")
+  (data (i32.const 240) "\30\31\32\33")
+  (data (i32.const 256) "\31\32\33\34")
+  (data (i32.const 272) "\32\33\34\35")
+  (data (i32.const 288) "\33\34\35\36")
+  (data (i32.const 304) "\34\35\36\37")
+  (data (i32.const 320) "\35\36\37\38")
+  (data (i32.const 336) "\36\37\38\39")
+  (data (i32.const 352) "\37\38\39\3a")
+  (data (i32.const 368) "\38\39\3a\3b")
+  (data (i32.const 384) "\39\3a\3b\3c")
+  (data (i32.const 400) "\3a\3b\3c\3d")
+  (data (i32.const 416) "\3b\3c\3d\3e")
+  (data (i32.const 432) "\3c\3d\3e\3f")
+  (data (i32.const 448) "\3d\3e\3f\40")
+  (data (i32.const 464) "\3e\3f\40\41")
+  (data (i32.const 480) "\3f\40\41\42")
+  (data (i32.const 496) "\40\41\42\43")
+  (data (i32.const 512) "\41\42\43\44")
+  (data (i32.const 528) "\42\43\44\45")
+  (data (i32.const 544) "\43\44\45\46")
+  (data (i32.const 560) "\44\45\46\47")
+  (data (i32.const 576) "\45\46\47\48")
+  (data (i32.const 592) "\46\47\48\49")
+  (data (i32.const 608) "\47\48\49\4a")
+  (data (i32.const 624) "\48\49\4a\4b")
+  (func $r3_poke i32.const 4 i32.const 47525 i32.store)
+  (func $app_read (export "app_read")
+    i32.const 4 i32.load drop
+    i32.const 0 i32.load drop
+    i32.const 80 i32.load drop
+    i32.const 160 i32.load drop
+    i32.const 240 i32.load drop
+    i32.const 320 i32.load drop
+    i32.const 400 i32.load drop
+    i32.const 480 i32.load drop
+    i32.const 560 i32.load drop
+  )
+)

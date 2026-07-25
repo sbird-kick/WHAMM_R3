@@ -41,6 +41,7 @@ struct WasmInfo {
     globals: Vec<GlobalInfo>,
     passive_segments: Vec<(u32, Vec<u8>)>,        // (segidx, bytes)
     active_nonzero_segments: Vec<(u32, u64, Vec<u8>)>, // (memidx, offset, bytes) for memidx != 0
+    memory_initial_pages: Vec<u64>,               // per memory, imported first
 }
 
 impl WasmInfo {
@@ -61,6 +62,7 @@ fn parse_wasm(bytes: &[u8]) -> WasmInfo {
         import_type_indices: Vec::new(), local_type_indices: Vec::new(),
         exports: Vec::new(), exported_globals: Vec::new(), globals: Vec::new(),
         passive_segments: Vec::new(), active_nonzero_segments: Vec::new(),
+        memory_initial_pages: Vec::new(),
     };
     let mut seg_idx: u32 = 0;
     for payload in Parser::new(0).parse_all(bytes) {
@@ -97,10 +99,14 @@ fn parse_wasm(bytes: &[u8]) -> WasmInfo {
                         w.globals.push(GlobalInfo { idx: w.num_imported_globals, valtype: gt.content_type, mutable_: gt.mutable, init_i64: None });
                         w.num_imported_globals += 1;
                     }
+                    TypeRef::Memory(mt) => w.memory_initial_pages.push(mt.initial),
                     _ => {}
                 }
             },
             Ok(Payload::FunctionSection(r)) => for ti in r { w.local_type_indices.push(ti.expect("func")); },
+            Ok(Payload::MemorySection(r)) => for m in r {
+                w.memory_initial_pages.push(m.expect("memory").initial);
+            },
             Ok(Payload::GlobalSection(r)) => for g in r {
                 let g = g.expect("global");
                 let idx = w.globals.len() as u32;
@@ -146,12 +152,26 @@ fn find_excluded(names: &HashMap<u32, String>, pattern: &str) -> Vec<u32> {
 
 // ── Predicate helpers ────────────────────────────────────────────────────
 
+// whamm's typecheck/fold/drop passes recurse over the BinOp tree, so a flat
+// N-term chain overflows the stack at ~550 terms (Lua/SQLite-sized modules).
+// Emitting a balanced parenthesized tree keeps depth at log2(N); verified fine
+// at 5000 terms. Semantically identical to the flat chain.
+fn balanced(mut terms: Vec<String>, op: &str) -> String {
+    while terms.len() > 1 {
+        terms = terms
+            .chunks(2)
+            .map(|c| if c.len() == 2 { format!("({} {op} {})", c[0], c[1]) } else { c[0].clone() })
+            .collect();
+    }
+    terms.pop().unwrap_or_default()
+}
+
 fn eq_pred(var: &str, fids: &[u32]) -> String {
-    fids.iter().map(|id| format!("{var} == {id}")).collect::<Vec<_>>().join(" || ")
+    balanced(fids.iter().map(|id| format!("{var} == {id}")).collect(), "||")
 }
 
 fn neq_pred(fids: &[u32]) -> String {
-    fids.iter().map(|id| format!("fid != {id}")).collect::<Vec<_>>().join(" && ")
+    balanced(fids.iter().map(|id| format!("fid != {id}")).collect(), "&&")
 }
 
 fn exclude_pred(excluded: &[u32]) -> String {
@@ -254,6 +274,13 @@ fn emit_preamble(info: &WasmInfo) {
         }
     }
 
+    // MG baseline: register each memory's DECLARED initial page count, so a
+    // host-side grow before the first EC/IR boundary is still detected
+    // (oracle baselines at instantiation; lazy first-observation missed it).
+    for (mi, pages) in info.memory_initial_pages.iter().enumerate() {
+        println!("@init r3_mem.init_mem_pages({mi} as i32, {pages} as i32);");
+    }
+
     // Shadow global init (tracked mutable globals with non-zero init)
     for g in info.globals.iter().filter(|g| g.mutable_ && info.exported_globals.contains(&g.idx)) {
         if let Some(val) = g.init_i64 {
@@ -286,6 +313,17 @@ fn check_fn(t: &ValType) -> &'static str {
               ValType::F32=>"check_global_f32", ValType::F64=>"check_global_f64", _=>"check_global_i32" }
 }
 
+// Float shadows hold IEEE bits (matching check_global_f32/f64); `arg0 as i64`
+// would numerically truncate (2.5 -> 2) and fabricate G divergences on the
+// next read, so float sets need the bit-preserving setters.
+fn set_call(t: &ValType, idx_expr: &str, val_expr: &str) -> String {
+    match t {
+        ValType::F32 => format!("r3_mem.shadow_global_set_f32({idx_expr} as i32, {val_expr});"),
+        ValType::F64 => format!("r3_mem.shadow_global_set_f64({idx_expr} as i32, {val_expr});"),
+        _ => format!("r3_mem.shadow_global_set({idx_expr} as i32, {val_expr} as i64);"),
+    }
+}
+
 fn emit_ig_probes(info: &WasmInfo) {
     let imported: Vec<&GlobalInfo> = info.globals.iter()
         .filter(|g| g.idx < info.num_imported_globals).collect();
@@ -298,7 +336,7 @@ fn emit_ig_probes(info: &WasmInfo) {
         println!("wasm:opcode:global.get(res0: {t}):after / imm0 == {idx} && !ig_done_{idx} / {{");
         println!("    ig_done_{idx} = true;");
         println!("    r3_mem.{}({idx} as i32, res0);", ig_fn(&g.valtype));
-        println!("    r3_mem.shadow_global_set({idx} as i32, res0 as i64);\n}}\n");
+        println!("    {}\n}}\n", set_call(&g.valtype, &idx.to_string(), "res0"));
     }
 }
 
@@ -410,7 +448,7 @@ fn emit_global_probes(info: &WasmInfo, excluded: &[u32]) {
             else { format!("{} && ({})", neq_pred(excluded), eq_pred("imm0", idxs)) };
 
         println!("wasm:opcode:global.set(arg0: {t}):before / {pred} / {{");
-        println!("    r3_mem.shadow_global_set(imm0 as i32, arg0 as i64);\n}}");
+        println!("    {}\n}}", set_call(valtype, "imm0", "arg0"));
         println!("wasm:opcode:global.get(res0: {t}):after / {pred} / {{");
         println!("    r3_mem.{}(imm0 as i32, res0);\n}}", check_fn(valtype));
     }

@@ -1,0 +1,127 @@
+Lua 5.4.7 interpreter as wasm32-wasip1 for R3 differential tests
+=================================================================
+
+Everything here is reproducible from committed files:
+  gen_tests_native/lua_runner.c      shared main wrapper (reduced openlibs)
+  gen_tests_native/lua_stubs.c       deterministic os/io/time stubs
+  gen_tests_native/lua_<name>.lua     the embedded Lua script (source of truth)
+  gen_tests_native/lua_<name>.wasm    the built test module
+
+Upstream Lua source is NOT committed (severance rule). Fetch + patch it as below.
+
+-----------------------------------------------------------------
+1. FETCH (sha256 verified)
+-----------------------------------------------------------------
+JOBTMP=/Users/humza/.claude/jobs/33c02e0d/tmp        # any scratch dir
+mkdir -p "$JOBTMP/lua_src" && cd "$JOBTMP/lua_src"
+curl -sSL https://www.lua.org/ftp/lua-5.4.7.tar.gz -o lua-5.4.7.tar.gz
+# expect: 9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30
+shasum -a 256 lua-5.4.7.tar.gz
+tar xzf lua-5.4.7.tar.gz
+SRC="$JOBTMP/lua_src/lua-5.4.7/src"
+
+-----------------------------------------------------------------
+2. AMALGAMATION (single translation unit, core + libs, no lua.c/luac.c)
+-----------------------------------------------------------------
+cat > "$SRC/lua_all.c" <<'EOF'
+#include "lzio.c"
+#include "lctype.c"
+#include "lopcodes.c"
+#include "lmem.c"
+#include "lundump.c"
+#include "ldump.c"
+#include "lstate.c"
+#include "lgc.c"
+#include "llex.c"
+#include "lcode.c"
+#include "lparser.c"
+#include "ldebug.c"
+#include "lfunc.c"
+#include "lobject.c"
+#include "ltm.c"
+#include "lstring.c"
+#include "ltable.c"
+#include "ldo.c"
+#include "lvm.c"
+#include "lapi.c"
+#include "lauxlib.c"
+#include "lbaselib.c"
+#include "lcorolib.c"
+#include "ldblib.c"
+#include "liolib.c"
+#include "lmathlib.c"
+#include "loadlib.c"
+#include "loslib.c"
+#include "lstrlib.c"
+#include "ltablib.c"
+#include "lutf8lib.c"
+#include "linit.c"
+EOF
+
+-----------------------------------------------------------------
+3. WASI SHIM for setjmp/longjmp
+-----------------------------------------------------------------
+# Wizard implements no THROW opcode (wizard-engine CanonicalDefs.v3: "missing
+# 0x08 THROW"), and LLVM's wasm SjLj lowering emits try/catch/throw that Wizard
+# cannot parse. So we replace Lua's longjmp-based error unwinding: LUAI_TRY runs
+# the protected body directly, LUAI_THROW aborts. Error-free / yield-free scripts
+# never call luaD_throw, so abort() is never reached. (Consequence: coroutine
+# .yield and error()-recovery are unsupported by these test binaries.)
+SHIM="$JOBTMP/shim"; mkdir -p "$SHIM"
+cat > "$SHIM/setjmp.h" <<'EOF'
+#ifndef LUA_WASI_SETJMP_SHIM_H
+#define LUA_WASI_SETJMP_SHIM_H
+#include <stdlib.h>   /* abort */
+typedef int jmp_buf[1];
+#define LUAI_THROW(L,c)   abort()
+#define LUAI_TRY(L,c,a)   { a }
+#define luai_jmpbuf       int
+#endif
+EOF
+
+-----------------------------------------------------------------
+4. BUILD the shared objects  (from the committed lua_runner.c / lua_stubs.c)
+-----------------------------------------------------------------
+CLANG=/Users/humza/Downloads/claude-play-space/wasi-sdk/bin/clang
+REPO=/Users/humza/Downloads/claude-play-space/WHAMM_R3/gen_tests_native
+
+# Lua core+libs. Defines:
+#   _WASI_EMULATED_SIGNAL  -> sig_atomic_t (lstate.h) ; link -lwasi-emulated-signal
+#   L_tmpnam=32            -> loslib.c os.tmpname buffer (never called)
+#   luai_makeseed(L)=0     -> constant hash seed: determinism + avoids time()
+"$CLANG" --target=wasm32-wasip1 -O2 -D_WASI_EMULATED_SIGNAL -DL_tmpnam=32 \
+  '-Dluai_makeseed(L)=0' -I"$SHIM" -c "$SRC/lua_all.c" -o "$JOBTMP/lua_all.o"
+
+# Deterministic stubs for os/io/time symbols wasi-libc omits or that must be
+# constant (time() overridden so hash seed / math seed / table.sort pivot are
+# deterministic and never hit wizeng's unimplemented clock_time_get).
+"$CLANG" --target=wasm32-wasip1 -O2 -c "$REPO/lua_stubs.c" -o "$JOBTMP/lua_stubs.o"
+
+-----------------------------------------------------------------
+5. BUILD one test .wasm  (repeat per lua_<name>.lua)
+-----------------------------------------------------------------
+# lua_runner.c reads an embedded byte array `lua_script` / `lua_script_len`.
+# Generate that array from the .lua with xxd, then link. --gc-sections drops the
+# io/os/debug library code that the reduced openlibs in lua_runner.c never
+# references (shrinks the module and cuts whamm instrumentation cost).
+build_one () {
+  name="$1"                       # e.g. lua_sieve
+  { echo "const unsigned char lua_script[] = {"; \
+    xxd -i < "$REPO/$name.lua"; \
+    echo "};"; \
+    echo "const unsigned int lua_script_len = sizeof(lua_script);"; \
+  } > "$JOBTMP/$name.gen.c"
+  "$CLANG" --target=wasm32-wasip1 -O2 -Wl,--gc-sections \
+    -I"$SRC" -I"$SHIM" \
+    "$REPO/lua_runner.c" "$JOBTMP/$name.gen.c" \
+    "$JOBTMP/lua_all.o" "$JOBTMP/lua_stubs.o" -lwasi-emulated-signal \
+    -o "$REPO/$name.wasm"
+}
+# for f in "$REPO"/lua_*.lua; do build_one "$(basename "$f" .lua)"; done
+
+-----------------------------------------------------------------
+6. VERIFY (from WHAMM_R3 repo root)
+-----------------------------------------------------------------
+#   ./test_c.sh gen_tests_native/lua_<name>.wasm    -> prints "PASS lua_<name>"
+# NOTE: whamm is a debug build; instrumenting a ~380-function Lua module takes
+# several minutes of CPU per test even before execution.

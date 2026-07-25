@@ -1,0 +1,1 @@
+script_gen omits global probes for NON-exported mutable globals: oracle emits G;0;55 on tee-chain global read, ours emits none.

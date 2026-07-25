@@ -1,0 +1,12 @@
+(module
+  (global (export "g0") f64 (f64.const 9689.0))
+  (global (export "g1") i32 (i32.const 3257))
+  (global (export "g2") i64 (i64.const 3467))
+  (global (export "g3") f32 (f32.const 1016.0))
+  (global $s (mut i32) (i32.const 100))
+  (func (export "h0") (result i32) global.get $s i32.const 25 i32.add global.set $s global.get $s)
+  (func (export "h1") (result i32) global.get $s i32.const 8 i32.add global.set $s global.get $s)
+  (func (export "h2") (result i32) global.get $s i32.const 27 i32.add global.set $s global.get $s)
+  (func (export "h3") (result i32) global.get $s i32.const 26 i32.add global.set $s global.get $s)
+  (func (export "h4") (result i32) global.get $s i32.const 17 i32.add global.set $s global.get $s)
+)

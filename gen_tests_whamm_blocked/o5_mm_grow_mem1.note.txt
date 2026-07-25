@@ -1,0 +1,1 @@
+whamm: valid 2-memory module using 'memory.grow 1' (non-zero memidx). whamm app parser: 'Found a memory.* instruction with an invalid reserved byte'. memory.grow/size on memory 0 parse fine; the multi-memory memidx encoding of memory.grow/memory.size is unsupported by whamm's decoder. Loads/stores on non-zero memories are fine.

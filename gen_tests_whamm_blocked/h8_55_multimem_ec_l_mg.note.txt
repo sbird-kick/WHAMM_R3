@@ -1,0 +1,1 @@
+whamm instr error: memory.grow on non-zero memory not supported

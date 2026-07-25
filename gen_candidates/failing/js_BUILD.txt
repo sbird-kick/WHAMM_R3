@@ -1,0 +1,64 @@
+js_quickjs_r3 — exact fetch + build + test commands (severance-reproducible).
+Engine: QuickJS-ng v0.10.1 (real-world JS engine, single dist tree kept OUT of repo).
+Target: wasm32-wasip1.  Compiler: wasi-sdk clang (v22.1.0-wasi-sdk).
+
+--------------------------------------------------------------------------------
+1. FETCH ENGINE SOURCE (out-of-repo)
+--------------------------------------------------------------------------------
+SRC=/Users/humza/.claude/jobs/33c02e0d/tmp/js_src
+mkdir -p "$SRC" && cd "$SRC"
+curl -sL -o quickjs-ng.tar.gz \
+  https://github.com/quickjs-ng/quickjs/archive/refs/tags/v0.10.1.tar.gz
+tar xf quickjs-ng.tar.gz          # -> quickjs-0.10.1/
+
+# (Duktape 2.7.0 was tried first and REJECTED: its setjmp/longjmp error model
+#  needs the wasm SjLj runtime (__wasm_setjmp/__wasm_longjmp), which wasi-sdk
+#  does not provide at link time -> unresolved symbols. QuickJS uses
+#  return-value error propagation, no setjmp, so it links cleanly.)
+
+--------------------------------------------------------------------------------
+2. BUILD  (wrapper = js_quickjs_r3.c, in this folder)
+--------------------------------------------------------------------------------
+CLANG=/Users/humza/Downloads/claude-play-space/wasi-sdk/bin/clang
+GC=/Users/humza/Downloads/claude-play-space/WHAMM_R3/gen_candidates/failing
+cd "$SRC"
+$CLANG -O1 -I quickjs-0.10.1 -Wl,--strip-all \
+  quickjs-0.10.1/quickjs.c quickjs-0.10.1/cutils.c \
+  quickjs-0.10.1/libregexp.c quickjs-0.10.1/libunicode.c quickjs-0.10.1/xsum.c \
+  "$GC/js_quickjs_r3.c" -o "$GC/js_quickjs_r3.wasm"
+# Needs the 5 .c files above (xsum.c supplies xsum_small_*; libregexp/libunicode
+# supply the regexp+unicode tables). No other deps. ~818 KB, 1039 wasm funcs.
+
+# Determinism (see js_quickjs_r3.c header): context via JS_NewContextRaw with
+# only pure intrinsics (NO Date, NO Performance); clock_gettime/gettimeofday
+# overridden to constants so the WASI clock_time_get import is never called
+# (Wizard's JVM WASI backend lacks it -> AbstractMethodError without this).
+
+--------------------------------------------------------------------------------
+3. RUN PLAIN (sanity) — deterministic stdout
+--------------------------------------------------------------------------------
+../wizard-engine/bin/wizeng.jvm "$GC/js_quickjs_r3.wasm"
+#   sumsq=338350
+#   arr=10,11,...,29
+#   str=WASMWASMWASM:12
+#   norm=25
+#   json={"a":1,"b":[2,3],"c":{"d":"x"}}:3
+#   re=1,2,3
+
+--------------------------------------------------------------------------------
+4. R3 DIFFERENTIAL TEST — FAILS on the whamm side (see js_quickjs_r3.note.txt)
+--------------------------------------------------------------------------------
+cd /Users/humza/Downloads/claude-play-space/WHAMM_R3
+./test_c.sh gen_candidates/failing/js_quickjs_r3.wasm     # -> FAIL (instr): whamm stack overflow
+
+# Plain oracle alone works and is deterministic (9 R3 events, identical across runs):
+./bin_wizeng --monitors=r3 gen_candidates/failing/js_quickjs_r3.wasm   # (use test_common.sh WIZENG)
+
+# whamm instr overflows the 8 MB main-thread stack on the 1044-term fid OR
+# predicate. Raising the stack lets it proceed but takes ~9.4 min (minimal
+# build) / >5.7 min (full) -> ~100x over budget:
+( ulimit -s 65500; \
+  ../whamm/target/debug/whamm instr --script <gen.mm> --app js_quickjs_r3.wasm \
+    --core-lib ../whamm/target/wasm32-wasip1/release/whamm_core.wasm \
+    --user-libs r3_mem=helper_lib/target/wasm32-wasip1/release/r3_mem.wasm \
+    --output-path /tmp/out.wasm )
