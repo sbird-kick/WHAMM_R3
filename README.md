@@ -594,7 +594,7 @@ The IG test cases:
 
 Two C/C++ tests are excluded because Wizard's own R3 monitor crashes on them (`ArrayIndexOutOfBoundsException` in `onMemoryCopy`): `fibonacci` and `complex`. Our implementation handles them correctly but they can't be oracle-verified.
 
-**Total: 1671/1671** tests pass across all suites via `./run_tests.sh` (verified 2026-07-25 on whamm v1.0.0 `c461d20`, wizard-engine branch `fix-r3-monitor-crashes` @ `f5cb89dc` — the suite requires that locally-patched oracle build).
+**Total: 1671/1671** tests pass across all suites via `./run_tests.sh` (verified 2026-07-25 on whamm v1.0.0 `c461d20`, wizard-engine branch `fix-r3-monitor-crashes` @ `b73f5ca8` — the suite requires that locally-patched oracle build).
 
 ## Known Limitations
 
