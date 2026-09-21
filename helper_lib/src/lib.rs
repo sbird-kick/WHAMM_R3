@@ -32,12 +32,13 @@ struct State {
     shadow_pages: Vec<u32>,         // per-memory page count for MG detection
     pages_registered: Vec<bool>,    // true once init_mem_pages seeded the baseline
     passive: HashMap<u32, Vec<u8>>, // passive data segments, registered at @init
+    printed: usize,                 // how many trace events print_trace has already emitted
 }
 
 static STATE: Lazy<Mutex<State>> = Lazy::new(|| Mutex::new(State {
     shadows: Vec::new(), shadow_globals: Vec::new(), trace: Vec::new(),
     building: None, names: HashMap::new(), shadow_pages: Vec::new(),
-    pages_registered: Vec::new(), passive: HashMap::new(),
+    pages_registered: Vec::new(), passive: HashMap::new(), printed: 0,
 }));
 
 fn shadow_of(s: &mut State, mem: u32) -> &mut Vec<u8> {
@@ -366,10 +367,17 @@ pub fn check_mem_grow(mem: i32, current_pages: i32) {
 
 #[no_mangle]
 pub fn print_trace() {
-    let s = STATE.lock().unwrap();
+    let mut s = STATE.lock().unwrap();
+
+    // `wasm:report` can fire more than once: whamm injects the report hook into
+    // the start function, so a module whose start function is ALSO its exported
+    // entry point runs it once per invocation. Emit only events recorded since
+    // the last call, otherwise the second report re-dumps the first one's
+    // events and the trace gains phantom duplicates.
+    let unprinted = s.printed;
 
     // Pass 1: IG events first, sorted by global index
-    let mut igs: Vec<(&u32, &String)> = s.trace.iter().filter_map(|ev| match ev {
+    let mut igs: Vec<(&u32, &String)> = s.trace[unprinted..].iter().filter_map(|ev| match ev {
         TraceEvent::ImportGlobal { idx, formatted } => Some((idx, formatted)),
         _ => None,
     }).collect();
@@ -377,7 +385,7 @@ pub fn print_trace() {
     for (idx, formatted) in igs { println!("IG;{};{}", idx, formatted); }
 
     // Pass 2: everything else in order
-    for ev in &s.trace {
+    for ev in &s.trace[unprinted..] {
         match ev {
             TraceEvent::ImportGlobal { .. } => {}
             TraceEvent::Load { mem, addr, bytes } => {
@@ -398,4 +406,6 @@ pub fn print_trace() {
             }
         }
     }
+
+    s.printed = s.trace.len();
 }
