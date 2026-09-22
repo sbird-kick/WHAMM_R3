@@ -12,6 +12,26 @@ Reimplementing Wizard Engine's R3 replay-recording monitor using whamm bytecode 
 
 Last verified **2026-07-25** on macOS arm64 (JVM backend) with: whamm master **v1.0.0** (`c461d20`), virgil `81f99693e`, wizard-engine branch `fix-r3-monitor-crashes` (`b73f5ca8`, one minimal commit on `2ccc7300`). whamm previously lived on the `memory_bound_variables` branch — that's merged; use master now.
 
+## Remote test hosts (2026-09-21)
+
+The full suite is impractical on the laptop (~2h; the 544 native tests dominate). Two remotes:
+
+- **`ssh gargantua`** (gargantua.s3d.cmu.edu, 96-core Xeon 8168, 376 GB) — **the one to use.** Full suite **1673/1673 in 16m01s** at `-j 40` (545 min CPU, 34x parallel efficiency). ~7.5x faster than the laptop end to end. Shared box with other users: **never exceed half the cores** (user's instruction). Setup at `~/r3work/{WHAMM_R3,whamm,wizard-engine,virgil,wasm-benchmarks}`; whamm pinned to `c461d20` (v1.0.0); rustup in `~/.cargo` (rustc 1.98.1 + wasm32-wasip1) so `helper_lib` builds on-box; Java 16 runs `wizeng.jvm.jar` fine. No GitHub key there and no local agent identities, so `WHAMM_R3` (private) arrives by rsync while `whamm`/`wasm-benchmarks` clone over https.
+- **`ssh AIEdevice`** (Ryzen AI 9 HX 370, 24-core, 22 GB, via `ProxyJump gargantua`) — faster per-core, full suite 1673/1673 in 22m27s at `-j 20`. **Memory-bound, not core-bound**: `-j 12` of JVM replays over the large wasm-r3-bench modules exhausted its 22 GB and wedged the box until reboot. Scale parallelism to module size there.
+
+Run with `WIZENG=../wizard-engine/bin/wizeng.jvm` — on Linux `test_common.sh` otherwise defaults to `wizeng.x86-64-linux`, which is **not** currently safe (see below).
+
+### The native backend is 2.6x faster but NOT yet trace-equivalent
+
+`wizeng.x86-64-linux --jit` runs the same 10 wasm-r3 tests in 4.5s vs the JVM's 11.9s, and Virgil (`~/r3work/virgil`, no sudo needed) cross-compiles it. **But the oracle disagrees with itself across backends.** On `gen_candidates/failing/cf_proc_exit_mid_call`:
+
+| backend | oracle trace | exit code |
+|---|---|---|
+| `wizeng.jvm` | `EC;1;_start;` + `IC;0` | 7 (correct — `proc_exit(7)`) |
+| `wizeng.x86-64-linux --jit` | nothing at all | 1 |
+
+The native backend neither propagates the exit code nor flushes the R3 monitor on `proc_exit` — a wizard native-backend bug, distinct from our own `proc_exit` gap. **Do not adopt the native backend as the baseline engine until a differential run (oracle only, both backends, all 1673 modules, diff the traces) shows they agree.** That run is cheap — no instrumentation — and is likely to surface more engine bugs.
+
 ## Adversarial campaign 2026-09-21
 
 Six agents (5 generating across distinct lenses, 1 researching external corpora). 27 cases
@@ -73,7 +93,7 @@ Systematic probe of every suspected coverage gap, oracle vs ours. Probe sources 
 |-----|---------|--------|
 | memory.init from passive segments | Our gap | **Fixed** — passive bytes registered @init, `memory.init:before` probe updates shadow. Regression: `gen_tests/gap_meminit` |
 | Multi-memory L/MG | Our gap | **Fixed** — per-memory shadows via whamm's static `memory` bound var. Regression: `gen_tests/gap_multimem`. Limits: cross-memory `memory.copy` unroutable; MG boundary checks memory-0-only |
-| Report anchor vs. entry point disagree | **Live bug — whole trace lost** | A module exporting `_start` and `main` as DISTINCT functions emits nothing while the oracle emits `EC;0;_start;`. whamm anchors its `on_exit`/`print_trace` call inside ONE designated function and picks `main`; wizard's CLI driver picks `_start`. `main` never runs, so the flush never fires and a correctly-recorded trace is discarded (`calls` on the instrumented module: `begin_event: 1`, `end_event: 1`, `print_trace` absent). Mirror image of the start-fn bug above — that fired report twice, this fires it zero times. Every one of the 894 gen_tests exports `_start` alone, which is why this never showed. Repro + full trace-down: `gen_candidates/failing/lc_start_and_main_distinct` + `ADVERSARIAL_2026-09-21.md`. Possible defence, now that `print_trace` is idempotent: flush at more anchors |
+| Report anchor vs. entry point disagree | **Fixed 2026-09-21** (`1fc454b`) | A module exporting `_start` and `main` as DISTINCT functions emits nothing while the oracle emits `EC;0;_start;`. whamm anchors its `on_exit`/`print_trace` call inside ONE designated function and picks `main`; wizard's CLI driver picks `_start`. `main` never runs, so the flush never fires and a correctly-recorded trace is discarded (`calls` on the instrumented module: `begin_event: 1`, `end_event: 1`, `print_trace` absent). Mirror image of the start-fn bug above — that fired report twice, this fires it zero times. Every one of the 894 gen_tests exports `_start` alone, which is why this never showed. Repro + full trace-down: `gen_candidates/failing/lc_start_and_main_distinct` + `ADVERSARIAL_2026-09-21.md`. **Fix:** `script_gen`'s `func:exit` probe now flushes whenever `call_depth` unwinds to 0, so every top-level call publishes its own events wherever whamm anchored the hook. Only safe because `ced3c85` made `print_trace` incremental. Verified 1673/1673 on gargantua |
 | `proc_exit` mid-call | **Live bug** | Trace truncated: oracle `EC;1;_start;`+`IC;0`, ours drops events. `proc_exit` appeared nowhere in this file before 2026-09-21 — entirely unexercised. Repro: `gen_candidates/failing/cf_proc_exit_mid_call` |
 | Tail calls (`return_call`) | **Live bug** | `return_call` from one exported fn to another leaves `call_depth` unbalanced (callee never fires `func:exit` for the caller's frame) → spurious second `EC`; the recursive variant loses the trace entirely. Repros: `gen_candidates/failing/cf_tailcall_export_to_export`, `report_recurse_tailcall_loses_trace` |
 | IG hoisting across report batches | **Live bug** | `print_trace` hoists IG events to the front of each batch sorted by global index; when the report anchor recurses, IG events split across batches and the per-batch sort no longer reproduces the oracle's single global order. Multi-module repro: `gen_candidates/failing/report_recurse_ig_reorder` (+ `_host`) |
