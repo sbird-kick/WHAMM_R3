@@ -365,8 +365,15 @@ fn emit_entry_probes(info: &WasmInfo, excluded: &[u32]) {
         println!("wasm:opcode:*:before / opidx == 0 && ({}) / {{\n    call_depth = call_depth + 1;\n}}", eq_pred("fid", &non_export));
     }
 
-    // func:exit
-    println!("\nwasm:func:exit{} {{\n    call_depth = call_depth - 1;\n}}\n", exclude_pred(excluded));
+    // func:exit. Flushing whenever we unwind back to depth 0 is what makes the
+    // trace survive a report anchor that never runs: whamm injects its
+    // wasm:report hook into ONE designated function (it prefers "main"), but
+    // wizard's driver picks the entry export itself (it prefers "_start"). A
+    // module exporting both as DISTINCT functions would otherwise record a
+    // correct trace and never print it. Safe to call repeatedly only because
+    // r3_mem::print_trace is incremental -- it emits just the events recorded
+    // since its last call (see the `printed` cursor).
+    println!("\nwasm:func:exit{} {{\n    call_depth = call_depth - 1;\n    if (call_depth == 0) {{\n        r3_mem.print_trace();\n    }}\n}}\n", exclude_pred(excluded));
 }
 
 fn emit_direct_call_probes(info: &WasmInfo, excluded: &[u32], npred: &str) {
